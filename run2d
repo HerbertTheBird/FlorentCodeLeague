@@ -1,8 +1,7 @@
 #!/bin/zsh
-# Run a local fcode match, then open the replay in the Cambridge Battlecode 2D
-# visualiser (instead of fcode's 3D one). The .replay26 wire format is shared
-# between the two engines (verified: identical proto field IDs for everything
-# both know about; fcode-only fields are skipped by the viewer).
+# Run a local fcode match, then open the replay in the Cambridge 2D visualiser
+# (bundled in tools/visualiser2d, patched for Titan's 2x2 core) instead of
+# fcode's 3D one. The .replay26 wire format is shared between the two engines.
 #
 # Usage:
 #   ./run2d BOT_A BOT_B [MAP_PATH] [fcode run options...]   # run match, then view
@@ -15,20 +14,13 @@
 set -e
 cd "${0:A:h}"
 
-FCODE=.venv/bin/fcode
-CAMBC=~/Documents/GitHub/Cambridge-Battlecode/venv/bin/cambc
 REPLAY=replay.replay26
 
-if [[ ! -x $CAMBC ]]; then
-    echo "cambc not found at $CAMBC" >&2
-    exit 1
-fi
-
 if (( $# == 0 )); then
-    exec $CAMBC watch $REPLAY
+    exec python3 tools/watch2d.py $REPLAY
 elif [[ $# == 1 && $1 == *.replay26 ]]; then
-    exec $CAMBC watch "$1"
+    exec python3 tools/watch2d.py "$1"
 fi
 
-$FCODE run "$@"
-exec $CAMBC watch $REPLAY
+.venv/bin/fcode run "$@"
+exec python3 tools/watch2d.py $REPLAY
