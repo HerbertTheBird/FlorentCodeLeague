@@ -1,0 +1,14 @@
+# Replays (regenerated with fcode run)
+*.replay26
+
+# Python
+__pycache__/
+*.pyc
+
+# Virtual environments
+.venv/
+venv/
+
+# IDE / OS
+.idea/
+.DS_Store
