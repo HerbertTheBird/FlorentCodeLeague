@@ -209,6 +209,53 @@ def atk_symmetry_target():
     return map_info.atk_symmetry_target(_atk_index)
 
 
+def _tile_open(x, y) -> bool:
+    if not (0 <= x < map_info._width and 0 <= y < map_info._height):
+        return False
+    bit = 1 << (x + y * map_info._width)
+    return not (map_info._bm_env[map_info._IDX_ENV_WALL] & bit) and not (map_info._bm_any_building & bit)
+
+
+def _nearest_open(cells):
+    mp = map_info._my_pos
+    best = None
+    best_d = None
+    for x, y in cells:
+        if not _tile_open(x, y):
+            continue
+        d = (x - mp.x) ** 2 + (y - mp.y) ** 2
+        if best_d is None or d < best_d:
+            best_d = d
+            best = Position(x, y)
+    return best
+
+
+def atk_target():
+    """This attack bot's movement target: the nearest open tile adjacent to the
+    gunner it most recently placed (while that gunner is still alive), else the
+    nearest open tile adjacent to the enemy core."""
+    last = attack.last_gunner_pos
+    if last is not None:
+        my_team = map_info._bm_team[map_info._my_team_idx]
+        if map_info._bm_et[map_info._IDX_GUNNER] & my_team & (1 << (last.x + last.y * map_info._width)):
+            adj = _nearest_open(
+                (last.x + dx, last.y + dy)
+                for dx in (-1, 0, 1) for dy in (-1, 0, 1) if dx or dy
+            )
+            if adj is not None:
+                return adj
+    core = map_info.atk_symmetry_target(_atk_index)
+    if core is None:
+        return None
+    ring = _nearest_open(
+        (x, y)
+        for x in range(core.x - 1, core.x + 3)
+        for y in range(core.y - 1, core.y + 3)
+        if not (core.x <= x <= core.x + 1 and core.y <= y <= core.y + 1)
+    )
+    return ring if ring is not None else core
+
+
 def heal_fallback():
     """Heal the best adjacent damaged ally, then self. Shared by the attack and
     defense builders; economy and reinforcement builders skip healing."""

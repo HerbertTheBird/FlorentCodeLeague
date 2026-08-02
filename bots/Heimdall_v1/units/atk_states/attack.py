@@ -609,6 +609,7 @@ def _my_claims():
 
 _cached_claims = 0
 target = None  # tile we're placing at / moving to, for status logging
+last_gunner_pos = None  # this unit's most recently placed gunner (for atk target)
 MAX_SCORE = 9
 
 def score():
@@ -677,8 +678,10 @@ def _try_instant_preferred(preferred: int) -> bool:
         return False
 
     if rc.can_build_gunner(best_pos, best_dir) and rc.get_global_resources() >= rc.get_gunner_cost() + max(map_info.builder_ti_reserve(), GUNNER_TI_FLOOR):
+        global last_gunner_pos
         log(f"InstantAttack gunner at {best_pos} dir={best_dir} score={best_score}")
         rc.build_gunner(best_pos, best_dir)
+        last_gunner_pos = best_pos
         comms.note_gunner_built()
         map_info.update_at(best_pos)
         return True
@@ -686,7 +689,7 @@ def _try_instant_preferred(preferred: int) -> bool:
 
 
 def run():
-    global cant_attack
+    global cant_attack, last_gunner_pos
     log("ATTACK")
     preferred = _cached_claims
     if not preferred:
@@ -744,5 +747,6 @@ def run():
     nav.move_adjacent(best)
     if rc.can_build_gunner(best, direction) and rc.get_global_resources() >= rc.get_gunner_cost() + max(map_info.builder_ti_reserve(), GUNNER_TI_FLOOR):
         rc.build_gunner(best, direction)
+        last_gunner_pos = best
         comms.note_gunner_built()
         map_info.update_at(best)

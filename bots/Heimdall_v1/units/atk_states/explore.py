@@ -31,12 +31,11 @@ def generate_explore_target():
     nrc = map_info._not_right_col
     board = (1 << (w * map_info._height)) - 1
     if units.builder._atk_bot:
-        # Attack bot: explore target is its symmetry-predicted enemy core (each
-        # of the two attackers guesses a different axis, falling back to the
-        # diagonal then the other axis as symmetries are eliminated).
-        enemy_core = units.builder.atk_symmetry_target()
-        if enemy_core is not None:
-            explore_target = enemy_core
+        # Attack bot: head to a tile adjacent to the gunner it most recently
+        # placed (while alive), else a tile adjacent to the enemy core.
+        atk_dest = units.builder.atk_target()
+        if atk_dest is not None:
+            explore_target = atk_dest
             return
         # No prediction yet (haven't seen our own core?) — head for the centre.
         explore_target = Position(w // 2, map_info._height // 2)
