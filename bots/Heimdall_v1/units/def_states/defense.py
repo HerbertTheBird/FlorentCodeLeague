@@ -835,6 +835,61 @@ def _execute_pvp_gunner_plan(plan) -> bool:
     return True
 
 
+def _visible_enemy_sentinels() -> set[Position]:
+    enemy_idx = 1 - map_info._my_team_idx
+    mask = (
+        map_info._bm_et[map_info._IDX_SENTINEL]
+        & map_info._bm_team[enemy_idx]
+        & map_info._bm_visible
+    )
+    return set(map_info.iter_mask(mask))
+
+
+def counter_battery() -> bool:
+    """Defensive counter-battery: from the tile we're already standing on (never
+    moving), build a gunner that shoots enemy gunners (weight 32) and/or
+    sentinels (weight 20). Picks the facing/placement with the highest weighted
+    coverage. Returns True if a gunner was built. Only these two enemy turret
+    types are ever targeted."""
+    gunners = _visible_enemy_gunners()
+    sentinels = _visible_enemy_sentinels()
+    if not gunners and not sentinels:
+        return False
+    weight = {}
+    for p in sentinels:
+        weight[p] = 20
+    for p in gunners:
+        weight[p] = 32
+    targets = set(weight)
+
+    my_pos = map_info._my_pos
+    best = None
+    for direction in _CARDINALS:
+        build_pos = map_info.pos_add(my_pos, direction)
+        if not map_info.in_bounds(build_pos) or not _empty_unoccupied(build_pos):
+            continue
+        for di in range(len(map_info._DIRECTIONS)):
+            hits = _gunner_ray_targets(build_pos, di, targets)
+            if not hits:
+                continue
+            score = sum(weight[p] for p in hits)
+            key = (score, -di)
+            if best is None or key > best[0]:
+                best = (key, build_pos, map_info._DIRECTIONS[di])
+    if best is None:
+        return False
+    _key, build_pos, facing = best
+    if (
+        rc.can_build_gunner(build_pos, facing)
+        and rc.get_global_resources() >= rc.get_gunner_cost() + map_info.builder_ti_reserve()
+    ):
+        rc.build_gunner(build_pos, facing)
+        comms.note_gunner_built()
+        map_info.update_at(build_pos)
+        return True
+    return False
+
+
 def _run_gunner_pvp() -> None:
     """Permanent post-launcher phase: enemy gunners first, core second."""
     global _pvp_focus

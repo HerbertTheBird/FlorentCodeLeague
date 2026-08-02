@@ -84,9 +84,9 @@ def _travel_by_launcher() -> bool:
         return False
 
     # FINAL JUMP: once the core is confirmed and a launcher we build could fling
-    # us to a tile adjacent to it, build that launcher. Checked before the close
-    # cutoff so it fires right at the end of the approach.
-    if _core_confident():
+    # us to a tile adjacent to it, build that launcher — unless we're already
+    # within 2 Chebyshev of the core, in which case we just walk the last step.
+    if _core_confident() and _cheb_to_core(my_pos, target) > 2:
         spot = _final_jump_spot(my_pos, target)
         if spot is not None:
             rc.build_launcher(spot)
@@ -114,6 +114,13 @@ def _travel_by_launcher() -> bool:
 
 def _cardinal_adjacent(a, b) -> bool:
     return abs(a.x - b.x) + abs(a.y - b.y) == 1
+
+
+def _cheb_to_core(pos, core_origin) -> int:
+    """Chebyshev distance from pos to the nearest tile of the enemy 2x2 core."""
+    dx = max(core_origin.x - pos.x, 0, pos.x - (core_origin.x + 1))
+    dy = max(core_origin.y - pos.y, 0, pos.y - (core_origin.y + 1))
+    return max(dx, dy)
 
 
 def _core_confident() -> bool:
