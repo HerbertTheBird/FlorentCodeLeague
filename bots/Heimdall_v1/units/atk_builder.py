@@ -32,6 +32,8 @@ _THROW_RANGE_SQ = 26
 
 _launch_wait = 0
 action = None    # "wait-launch" / "build-launcher" / "goto-ring" for status
+_ring_target = None   # ring site we've committed to build (avoids chasing a
+                      # shifting plan turn to turn)
 
 
 def run() -> None:
@@ -59,7 +61,7 @@ def _friendly_launchers():
 def _travel_by_launcher() -> bool:
     """Returns True if this turn was spent traveling by launcher (built one, or
     held beside one to be flung) — the caller then skips the normal states."""
-    global _launch_wait, action
+    global _launch_wait, action, _ring_target
     action = None
     if not builder._atk_bot:
         return False
@@ -96,20 +98,32 @@ def _travel_by_launcher() -> bool:
     if _manhattan(my_pos, target) < _LAUNCH_MIN_MANHATTAN:
         return False   # close, no final jump available — attack/explore normally
 
-    # DEFENSE: build a launcher where the defenders were going to put one anyway
-    # (a planned ring site ahead of us, near base), moving to it if not adjacent.
-    # Nothing is built across the middle of the map — we just walk it.
-    site = _nearest_ring_site(my_pos, target)
+    # DEFENSE: build a launcher on the exact tile a defender would put one next
+    # (a planned ring site ahead of us, near base). Commit to one site until it's
+    # actually built (by us or a defender) so we don't chase a shifting plan.
+    # Move into a cardinal build STANCE beside the site — never onto it — then
+    # build on the site itself. Nothing is built across the middle of the map.
+    if _ring_target is not None and not _site_open(_ring_target):
+        _ring_target = None
+    if _ring_target is None:
+        _ring_target = _nearest_ring_site(my_pos, target)
+    site = _ring_target
     if site is not None:
-        if _cardinal_adjacent(my_pos, site):
-            if rc.can_build_launcher(site):
-                rc.build_launcher(site)
-                action = "build-launcher"
-                return True
-        elif builder.nav.move_to(site):
+        if _cardinal_adjacent(my_pos, site) and rc.can_build_launcher(site):
+            rc.build_launcher(site)
+            _ring_target = None
+            action = "build-launcher"
+            return True
+        if defense._move_into_build_range(site):
             action = "goto-ring"
             return True
+        _ring_target = None   # can't approach it — drop it
     return False   # walk the middle — no chain launchers
+
+
+def _site_open(site) -> bool:
+    """The ring site is still worth pursuing if nothing has been built on it yet."""
+    return not (map_info._bm_any_building & (1 << (site.x + site.y * map_info._width)))
 
 
 def _cardinal_adjacent(a, b) -> bool:
@@ -172,13 +186,17 @@ def _final_jump_spot(my_pos, core_origin):
 
 
 def _nearest_ring_site(my_pos, target):
-    """Nearest planned defender ring launcher site that is ahead of us (no
-    farther from the target than we are) and close by. None once the ring is
-    covered or we've moved past it."""
-    try:
-        sites = defense._calculate_tiling()
-    except Exception:
-        return None
+    """The exact tile a defender would build its next ring launcher on (for
+    either lane), if one is ahead of us (no farther from the target than we are)
+    and close by. None once the ring is covered or we've moved past it."""
+    sites = []
+    for lane in (0, 1):
+        try:
+            s = defense.next_launcher_site(lane)
+        except Exception:
+            s = None
+        if s is not None:
+            sites.append(s)
     if not sites:
         return None
     my_to_target = _manhattan(my_pos, target)

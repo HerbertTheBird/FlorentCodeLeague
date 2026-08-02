@@ -499,7 +499,14 @@ class Pathing:
                 # (move_to's stuck-escape still frees us if we wait too long.) We
                 # only sidestep/dodge when there is no strictly-closer step.
                 non_self = hit & ~start_mask
-                if (start_mask & hit) and non_self:
+                if (
+                    (start_mask & hit)
+                    and non_self
+                    and not (map_info._bm_enemy_hard_threat & start_mask)
+                ):
+                    # Same-distance sidestep and we're not being shot: stay put.
+                    # (If we ARE on an enemy gunner's ray we fall through and
+                    # move, so we step off the line of fire.)
                     cx = start_n % width
                     cy = start_n // width
                     start_pos = Position(cx, cy)

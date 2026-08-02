@@ -1000,10 +1000,12 @@ def note_shared_core(pos: Position) -> None:
 
 
 def atk_symmetry_target(atk_index):
-    """Enemy-core target for attack builder ``atk_index``. Once symmetry is
-    confirmed, both attackers converge on the real predicted enemy core; before
-    that each guesses a different axis, falling back as axes are eliminated
-    (index 0: horizontal -> rotational(diagonal) -> vertical; index 1 reversed).
+    """Enemy-core target for attack builder ``atk_index``.
+      - Before the symmetry is known, both attackers assume the DIAGONAL
+        (rotational) core.
+      - If rotational is eliminated, the two split to the axes (index 0 ->
+        horizontal, index 1 -> vertical) while both axes are still possible.
+      - Once only one symmetry remains it is known, so both target the real core.
     Returns None until our own core is known (locally or via comms). Shared by
     the attack builder (explore target) and the launcher (throw target) so both
     derive the same destination from the same symmetry/map state."""
@@ -1012,30 +1014,14 @@ def atk_symmetry_target(atk_index):
         return None
     if _their_core is not None:
         return _their_core
-    if _solved_sym:
-        # Confirmed symmetry: the single surviving axis gives the real core.
-        if _my_core is not None and _predicted_enemy_core is not None:
-            return _predicted_enemy_core
-        if _hor_sym:
-            return hor_flip_core(core)
-        if _ver_sym:
-            return ver_flip_core(core)
-        return rot_flip_core(core)
-    if atk_index == 1:
-        order = (
-            (_ver_sym, ver_flip_core),
-            (_rot_sym, rot_flip_core),
-            (_hor_sym, hor_flip_core),
-        )
-    else:
-        order = (
-            (_hor_sym, hor_flip_core),
-            (_rot_sym, rot_flip_core),
-            (_ver_sym, ver_flip_core),
-        )
-    for alive, flip in order:
-        if alive:
-            return flip(core)
+    if _rot_sym:
+        return rot_flip_core(core)          # diagonal first
+    if _hor_sym and _ver_sym:               # rotational gone -> split the axes
+        return ver_flip_core(core) if atk_index == 1 else hor_flip_core(core)
+    if _hor_sym:                            # only one axis left -> known core
+        return hor_flip_core(core)
+    if _ver_sym:
+        return ver_flip_core(core)
     return _predicted_enemy_core
 
 
@@ -1598,13 +1584,13 @@ def get_avoid(
     if avoid_builders:
         mask |= _bm_friendly_bots | _bm_enemy_bots
     if not enemy_pov:
-        threat = _bm_enemy_hard_threat
         pos = _my_pos
         my_bit = 1 << (pos.x + pos.y * _width)
-        if not (threat & my_bit):
-            mask |= threat
+        # Always avoid enemy gunner fire lines. The builder's own tile is
+        # excluded so that a builder already being shot can still step off the
+        # ray (rather than the whole mask being dropped, which let it linger).
+        mask |= _bm_enemy_hard_threat & ~my_bit
         mask |= _bm_enemy_launch_adj
-        # Don't walk in front of our own gunners and block their line of fire
-        # (own tile excluded so a builder already on a ray can still step off).
+        # Same for our own gunners' fire lines — don't block their shots.
         mask |= _bm_my_gunner_claims & ~my_bit
     return mask
