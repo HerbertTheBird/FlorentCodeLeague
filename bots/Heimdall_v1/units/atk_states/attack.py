@@ -608,6 +608,7 @@ def _my_claims():
 
 
 _cached_claims = 0
+target = None  # tile we're placing at / moving to, for status logging
 MAX_SCORE = 9
 
 def score():
@@ -733,6 +734,8 @@ def run():
     if best_lead_tile is not None:
         best = best_lead_tile
 
+    global target
+    target = best
     direction, _, _ = get_best_direction(best)
     core_facing = _enemy_core_facing(best)
     if core_facing is not None:

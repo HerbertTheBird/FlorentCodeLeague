@@ -21,7 +21,7 @@ import units.atk_builder as atk_builder
 import units.def_builder as def_builder
 import units.econ_builder as econ_builder
 
-from log import DRAW_DEBUG
+from log import DRAW_DEBUG, status
 
 
 rc: Controller
@@ -43,11 +43,12 @@ _ATK_STATES = tuple(sorted(
     reverse=True
 ))
 
-# Economy builders are strict specialists. If neither harvesting nor an
-# unfinished route is available, they wait rather than exploring or helping
-# with combat/defense work.
+# Economy builders harvest ore and lay conveyor routes. explore is included only
+# as a last-resort fallback (MAX_SCORE 1, below harvest/route) so an econ bot with
+# no reachable ore to claim walks off to find some instead of idling forever —
+# harvest takes back over the moment ore is claimable.
 _ECONOMY_STATES = tuple(sorted(
-    [harvest, route],
+    [harvest, route, explore],
     key=lambda s: s.MAX_SCORE,
     reverse=True
 ))
@@ -175,7 +176,11 @@ def _update_initial_explore(current_round: int):
         _initial_explore_target = None
 
 
+_chosen_state = None   # last state select_best_state() picked, for status logging
+
+
 def select_best_state():
+    global _chosen_state
     best_state = None
     best_score = 0
 
@@ -194,6 +199,7 @@ def select_best_state():
             best_score = score
             best_state = state
 
+    _chosen_state = best_state
     return best_state
 
 
@@ -292,3 +298,32 @@ def run():
         def_builder.run()
     else:
         atk_builder.run()
+
+    _log_status()
+
+
+def _role_name():
+    if _reinforcement_enemy_id:
+        return "reinf"
+    if _economy_builder:
+        return "econ"
+    if _defense_lane is not None:
+        return "def%d" % _defense_lane
+    if _atk_bot:
+        return "atk%d" % (_atk_index if _atk_index is not None else -1)
+    return "gen"
+
+
+def _log_status():
+    role = _role_name()
+    if _reinforcement_enemy_id:
+        state, target = "mirror", _reinforcement_position
+    elif _defense_lane is not None and not _economy_builder:
+        state, target = "defense", getattr(defense, "target", None)
+    elif _chosen_state is not None:
+        state = _chosen_state.__name__.rsplit(".", 1)[-1]
+        target = getattr(_chosen_state, "target", None)
+    else:
+        state, target = "idle", None
+    status("id=%d %s role=%s state=%s target=%s" % (
+        rc.get_id(), map_info._my_pos, role, state, target))

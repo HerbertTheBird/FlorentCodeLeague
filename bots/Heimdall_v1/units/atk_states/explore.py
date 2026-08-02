@@ -12,6 +12,7 @@ nav: Pathing = None
 
 explore_target = None
 _explore_target_from_initial = False
+target = None  # current destination, for status logging
 
 
 def init(c: Controller):
@@ -111,6 +112,8 @@ def run():
     if explore_target is None or map_info._my_pos.distance_squared(explore_target) <= 18:
         generate_explore_target()
         _explore_target_from_initial = False
+    global target
+    target = explore_target
     attempts = 0
     while attempts < 1:
         if not nav.move_to(explore_target):

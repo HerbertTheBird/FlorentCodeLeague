@@ -110,6 +110,7 @@ def _my_claims():
     return pathing.claim_subset(my_mask, map_info._bm_friendly_bots, candidates, tie_self=True)
 
 _cached_claims = 0
+target = None  # tile we're routing, for status logging
 
 MAX_SCORE = 7.75
 def score():
@@ -229,6 +230,8 @@ def run():
         is_harvester = cand_is_harvester
         break
 
+    global target
+    target = best
     if best is None:
         return
 

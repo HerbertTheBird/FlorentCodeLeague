@@ -96,6 +96,7 @@ def _too_expensive():
 
 MAX_SCORE = 4
 _cached_claims = 0
+target = None  # ore we're harvesting, for status logging
 def score():
     global _cached_claims
     _cached_claims = _my_claims()
@@ -159,6 +160,8 @@ def run():
         path = cand_path
         break
 
+    global target
+    target = best_ore
     if best_ore is None:
         return
 

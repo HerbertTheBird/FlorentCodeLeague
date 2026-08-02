@@ -191,28 +191,12 @@ def _handoff_slot(lane: int, field: int) -> int:
     return DEFENSE_HANDOFF_BASE + lane * DEFENSE_HANDOFF_STRIDE + field
 
 
-def assign_defender(lane: int, builder_id: int) -> None:
-    """Assign initial-spawn builder ``builder_id`` to defense lane 0 or 1."""
-    slot = _handoff_slot(lane, 0)
-    value = rc.read_store(slot)
-    rc.write_store(slot, (value & 0xFFFF0000) | (builder_id & 0xFFFF))
-
-
-# The two attack builders live in the reserved high bits of the two defender
-# mailboxes (slot 9 = atk 0, slot 12 = atk 1); launcher/defender writes preserve
-# those high bits. The economy builder lives in slot 8 bits 16..29 (low 16 =
-# gunner counter, bits 30/31 = ring/pvp flags).
+# Opening role ids in the two defender mailboxes: attack builder in the high bits
+# (slot 9 = atk 0, slot 12 = atk 1), lane defender in the low 16. Both are written
+# together by rebroadcast_lane(). The economy builder lives in slot 8 bits 16..29
+# (low 16 = gunner counter, bits 30/31 = ring/pvp flags).
 _ECON_ID_SHIFT = 16
 _ECON_ID_MASK = 0x3FFF
-
-
-def assign_atk(index: int, builder_id: int) -> None:
-    """Publish attack builder ``index`` (0 or 1) in lane ``index``'s mailbox
-    high bits."""
-    slot = _handoff_slot(index, 0)
-    value = rc.read_store(slot)
-    mask = _ROLE_ID_MASK << _MAILBOX_ROLE_SHIFT
-    rc.write_store(slot, (value & ~mask) | ((builder_id & _ROLE_ID_MASK) << _MAILBOX_ROLE_SHIFT))
 
 
 def atk_index(builder_id: int):
@@ -224,6 +208,20 @@ def atk_index(builder_id: int):
         if ((value >> _MAILBOX_ROLE_SHIFT) & _ROLE_ID_MASK) == builder_id:
             return index
     return None
+
+
+def rebroadcast_lane(lane: int, atk_id: int, def_id: int) -> None:
+    """Write a lane's mailbox role ids in ONE store write — attack builder in the
+    high bits, lane defender in the low 16. Separate assign_atk / assign_defender
+    calls in the same round would clobber each other: buffered writes mean the
+    second reads the pre-round value and overwrites the first's field."""
+    slot = _handoff_slot(lane, 0)
+    v = rc.read_store(slot)
+    if atk_id:
+        v = (v & ~(_ROLE_ID_MASK << _MAILBOX_ROLE_SHIFT)) | ((atk_id & _ROLE_ID_MASK) << _MAILBOX_ROLE_SHIFT)
+    if def_id:
+        v = (v & 0xFFFF0000) | (def_id & 0xFFFF)
+    rc.write_store(slot, v)
 
 
 def assign_economy(builder_id: int) -> None:

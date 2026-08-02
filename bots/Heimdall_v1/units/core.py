@@ -14,6 +14,7 @@ _spawn_plan: list[Direction] | None = None
 _num_spawned = 0
 _core_area: tuple[Position, ...] = ()
 _atk_ids = [0, 0]
+_def_ids = [0, 0]
 _economy_id = 0
 
 
@@ -39,16 +40,16 @@ def init(c: Controller):
 
 
 def _record_opening_spawn(spawn_index: int, builder_id: int) -> None:
-    """Assign defense, defense, attack, attack, economy roles in that order."""
-    global _num_spawned, _atk_ids, _economy_id
+    """Record the opening role (attack, attack, economy, defense, defense) for
+    this builder. The actual mailbox writes happen once per round in run() so a
+    lane's attack id (high bits) and defender id (low bits) share a single write."""
+    global _num_spawned, _economy_id
     if spawn_index in (0, 1):
-        comms.assign_defender(spawn_index, builder_id)
-    elif spawn_index in (2, 3):
-        _atk_ids[spawn_index - 2] = builder_id
-        comms.assign_atk(spawn_index - 2, builder_id)
-    elif spawn_index == 4:
+        _atk_ids[spawn_index] = builder_id
+    elif spawn_index == 2:
         _economy_id = builder_id
-        comms.assign_economy(builder_id)
+    elif spawn_index in (3, 4):
+        _def_ids[spawn_index - 3] = builder_id
     _num_spawned += 1
 
 
@@ -58,10 +59,10 @@ def _spawn_toward_plan(core_pos: Position) -> bool:
 
     spawn_index = _num_spawned
 
-    # Spawn each defender cardinally beside its first launcher whenever the
-    # core's full two-tile spawn radius permits it. This lets the defender build
-    # immediately on its first turn without spending a movement turn.
-    initial_launcher = defense.next_launcher_site(spawn_index) if spawn_index < 2 else None
+    # Spawn each defender (spawn 3 and 4 -> lanes 0 and 1) cardinally beside its
+    # first launcher whenever the core's full two-tile spawn radius permits it.
+    # This lets the defender build immediately on its first turn.
+    initial_launcher = defense.next_launcher_site(spawn_index - 3) if spawn_index in (3, 4) else None
     if initial_launcher is not None:
         for p in sorted(
             _core_area,
@@ -77,13 +78,13 @@ def _spawn_toward_plan(core_pos: Position) -> bool:
                 _record_opening_spawn(spawn_index, builder_id)
                 return True
 
-    # The rusher gets the most center-facing ray; economy gets the remaining
-    # farthest opening ray. Defender fallback uses its launcher's direction.
+    # Attack bots (spawn 0, 1) get the two lead rays; economy (spawn 2) gets the
+    # farthest ray. Defenders spawn toward their launcher (handled above).
     if initial_launcher is not None:
         planned_dir = map_info.direction_to(core_pos, initial_launcher)
-    elif spawn_index == 2:
+    elif spawn_index == 0:
         planned_dir = _spawn_plan[0]
-    elif spawn_index == 3:
+    elif spawn_index == 1:
         planned_dir = _spawn_plan[1] if len(_spawn_plan) > 1 else _spawn_plan[0]
     else:  # economy
         planned_dir = _spawn_plan[-1]
@@ -253,9 +254,12 @@ def run():
     # Launcher handoffs and opening role assignment share mailbox words. Their
     # writes are buffered, so rebroadcast the reserved high bits until every
     # opening builder has permanently recognized its role.
-    for i, aid in enumerate(_atk_ids):
-        if aid:
-            comms.assign_atk(i, aid)
+    # Rebroadcast opening role ids (buffered writes need repeating until every
+    # builder has seen its assignment). One combined write per lane slot keeps the
+    # attack (high bits) and defender (low bits) ids from clobbering each other.
+    for lane in (0, 1):
+        if _atk_ids[lane] or _def_ids[lane]:
+            comms.rebroadcast_lane(lane, _atk_ids[lane], _def_ids[lane])
     if _economy_id:
         comms.assign_economy(_economy_id)
                 

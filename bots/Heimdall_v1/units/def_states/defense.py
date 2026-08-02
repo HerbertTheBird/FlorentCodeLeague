@@ -19,6 +19,7 @@ from pathing import Pathing
 rc: Controller = None
 nav: Pathing = None
 
+target = None  # current launcher build site, for status logging
 _wait_round = -1
 _wait_position: Position | None = None
 _patrol_mode = False
@@ -387,7 +388,9 @@ def _next_site(lane: int) -> Position | None:
 
 def next_launcher_site(lane: int) -> Position | None:
     """Public planner entry point shared by the core and defense builders."""
-    return _next_site(lane)
+    global target
+    target = _next_site(lane)
+    return target
 
 
 def _wait_for_new_launcher() -> bool:
