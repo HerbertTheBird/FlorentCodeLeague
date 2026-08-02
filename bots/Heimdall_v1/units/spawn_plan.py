@@ -6,8 +6,9 @@ from fcode import Controller, Direction, Environment, Position
 import map_info
 from log import DRAW_DEBUG
 
-# Number of initial builder bots that follow the core's spawn plan.
-INITIAL_SPAWN_COUNT = 4
+# Opening composition: 2 defenders, 2 attackers, 1 economy builder (in that
+# spawn order).
+INITIAL_SPAWN_COUNT = 5
 
 # Chebyshev-step cap for a builder bot's initial ray-follow exploration.
 # The core draws lines capped to +1 to account for the bot starting one step out from the core.

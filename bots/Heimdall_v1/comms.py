@@ -198,30 +198,45 @@ def assign_defender(lane: int, builder_id: int) -> None:
     rc.write_store(slot, (value & 0xFFFF0000) | (builder_id & 0xFFFF))
 
 
-def assign_rusher(builder_id: int) -> None:
-    """Publish the third builder in lane 0's reserved mailbox high bits."""
-    slot = _handoff_slot(0, 0)
+# The two attack builders live in the reserved high bits of the two defender
+# mailboxes (slot 9 = atk 0, slot 12 = atk 1); launcher/defender writes preserve
+# those high bits. The economy builder lives in slot 8 bits 16..29 (low 16 =
+# gunner counter, bits 30/31 = ring/pvp flags).
+_ECON_ID_SHIFT = 16
+_ECON_ID_MASK = 0x3FFF
+
+
+def assign_atk(index: int, builder_id: int) -> None:
+    """Publish attack builder ``index`` (0 or 1) in lane ``index``'s mailbox
+    high bits."""
+    slot = _handoff_slot(index, 0)
     value = rc.read_store(slot)
     mask = _ROLE_ID_MASK << _MAILBOX_ROLE_SHIFT
     rc.write_store(slot, (value & ~mask) | ((builder_id & _ROLE_ID_MASK) << _MAILBOX_ROLE_SHIFT))
 
 
-def is_rusher(builder_id: int) -> bool:
-    value = rc.read_store(_handoff_slot(0, 0))
-    return ((value >> _MAILBOX_ROLE_SHIFT) & _ROLE_ID_MASK) == builder_id
+def atk_index(builder_id: int):
+    """Return which attack slot (0 or 1) this builder was assigned, else None."""
+    if not builder_id:
+        return None
+    for index in (0, 1):
+        value = rc.read_store(_handoff_slot(index, 0))
+        if ((value >> _MAILBOX_ROLE_SHIFT) & _ROLE_ID_MASK) == builder_id:
+            return index
+    return None
 
 
 def assign_economy(builder_id: int) -> None:
-    """Publish the fourth builder in lane 1's reserved mailbox high bits."""
-    slot = _handoff_slot(1, 0)
-    value = rc.read_store(slot)
-    mask = _ROLE_ID_MASK << _MAILBOX_ROLE_SHIFT
-    rc.write_store(slot, (value & ~mask) | ((builder_id & _ROLE_ID_MASK) << _MAILBOX_ROLE_SHIFT))
+    v = rc.read_store(OPENING_ROLE_SLOT)
+    mask = _ECON_ID_MASK << _ECON_ID_SHIFT
+    rc.write_store(OPENING_ROLE_SLOT, (v & ~mask) | ((builder_id & _ECON_ID_MASK) << _ECON_ID_SHIFT))
 
 
 def is_economy(builder_id: int) -> bool:
-    value = rc.read_store(_handoff_slot(1, 0))
-    return ((value >> _MAILBOX_ROLE_SHIFT) & _ROLE_ID_MASK) == builder_id
+    if not builder_id:
+        return False
+    v = rc.read_store(OPENING_ROLE_SLOT)
+    return ((v >> _ECON_ID_SHIFT) & _ECON_ID_MASK) == (builder_id & _ECON_ID_MASK)
 
 
 def mark_ring_complete() -> None:

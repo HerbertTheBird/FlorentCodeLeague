@@ -29,9 +29,11 @@ def generate_explore_target():
     nlc = map_info._not_left_col
     nrc = map_info._not_right_col
     board = (1 << (w * map_info._height)) - 1
-    if units.builder._rush_builder:
-        # Rush builder: explore target is pinned to the (predicted) enemy core.
-        enemy_core = map_info._their_core or map_info._predicted_enemy_core
+    if units.builder._atk_bot:
+        # Attack bot: explore target is its symmetry-predicted enemy core (each
+        # of the two attackers guesses a different axis, falling back to the
+        # diagonal then the other axis as symmetries are eliminated).
+        enemy_core = units.builder.atk_symmetry_target()
         if enemy_core is not None:
             explore_target = enemy_core
             return

@@ -13,7 +13,7 @@ DEFENSE_FRIENDLY_RADIUS_SQ = 36
 _spawn_plan: list[Direction] | None = None
 _num_spawned = 0
 _core_area: tuple[Position, ...] = ()
-_rusher_id = 0
+_atk_ids = [0, 0]
 _economy_id = 0
 
 
@@ -39,14 +39,14 @@ def init(c: Controller):
 
 
 def _record_opening_spawn(spawn_index: int, builder_id: int) -> None:
-    """Assign defense, defense, rush, economy roles in that order."""
-    global _num_spawned, _rusher_id, _economy_id
+    """Assign defense, defense, attack, attack, economy roles in that order."""
+    global _num_spawned, _atk_ids, _economy_id
     if spawn_index in (0, 1):
         comms.assign_defender(spawn_index, builder_id)
-    elif spawn_index == 2:
-        _rusher_id = builder_id
-        comms.assign_rusher(builder_id)
-    elif spawn_index == 3:
+    elif spawn_index in (2, 3):
+        _atk_ids[spawn_index - 2] = builder_id
+        comms.assign_atk(spawn_index - 2, builder_id)
+    elif spawn_index == 4:
         _economy_id = builder_id
         comms.assign_economy(builder_id)
     _num_spawned += 1
@@ -83,7 +83,9 @@ def _spawn_toward_plan(core_pos: Position) -> bool:
         planned_dir = map_info.direction_to(core_pos, initial_launcher)
     elif spawn_index == 2:
         planned_dir = _spawn_plan[0]
-    else:
+    elif spawn_index == 3:
+        planned_dir = _spawn_plan[1] if len(_spawn_plan) > 1 else _spawn_plan[0]
+    else:  # economy
         planned_dir = _spawn_plan[-1]
     tried = set()
     for d in (planned_dir, planned_dir.rotate_left(), planned_dir.rotate_right()):
@@ -251,8 +253,9 @@ def run():
     # Launcher handoffs and opening role assignment share mailbox words. Their
     # writes are buffered, so rebroadcast the reserved high bits until every
     # opening builder has permanently recognized its role.
-    if _rusher_id:
-        comms.assign_rusher(_rusher_id)
+    for i, aid in enumerate(_atk_ids):
+        if aid:
+            comms.assign_atk(i, aid)
     if _economy_id:
         comms.assign_economy(_economy_id)
                 

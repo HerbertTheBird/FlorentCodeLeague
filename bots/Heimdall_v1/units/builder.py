@@ -35,9 +35,9 @@ states = tuple(sorted(
     reverse=True
 ))
 
-# The rush builder only ever attacks or explores (its explore target is pinned
-# to the enemy core) — no harvesting, routing, healing, or disrupting.
-_RUSH_STATES = tuple(sorted(
+# Attack builders only ever attack or explore (their explore target is pinned to
+# a symmetry-predicted enemy core) — no harvesting, routing, healing, disrupting.
+_ATK_STATES = tuple(sorted(
     [explore, attack],
     key=lambda s: s.MAX_SCORE,
     reverse=True
@@ -63,10 +63,13 @@ _initial_explore_calculated = False
 _initial_explore_target: Position | None = None
 _initial_explore_round = -1
 
-# Heimdall's third opening builder is the RUSH builder. Its explore target is
-# pinned to the (predicted) enemy core, so it crosses the map early — scouting,
-# confirming symmetry, and letting attack take over near enemy structures.
-_rush_builder = False
+# Opening builders 3 and 4 are the two ATTACK builders. Each is pinned to a
+# different symmetry-predicted enemy core (atk 0 -> horizontal-first, atk 1 ->
+# vertical-first), so they cross the map early along different guesses —
+# scouting, confirming symmetry, and letting attack take over near enemy
+# structures. _atk_index selects the symmetry-fallback order.
+_atk_bot = False
+_atk_index: int | None = None
 _economy_builder = False
 _defense_lane: int | None = None
 _opening_role_checked = False
@@ -159,7 +162,7 @@ def _update_initial_explore(current_round: int):
     if not _initial_explore_calculated:
         # Only first few builders follow initial explore plan (not the rusher —
         # its explore target is pinned to the enemy core instead)
-        if not _rush_builder and _defense_lane is None and current_round <= INITIAL_SPAWN_COUNT + 1 and map_info._my_core is not None:
+        if not _atk_bot and _defense_lane is None and current_round <= INITIAL_SPAWN_COUNT + 1 and map_info._my_core is not None:
             # Choose explore direction based on where we are relative to core
             spawn_dir = map_info.direction_to(map_info._my_core, map_info._my_pos)
             _initial_explore_target = get_ray_endpoint(map_info._my_pos, spawn_dir, map_info._width, map_info._height, max_steps=INITIAL_EXPLORE_MAX_STEPS)
@@ -177,7 +180,7 @@ def select_best_state():
     best_score = 0
 
     available_states = (
-        _RUSH_STATES if _rush_builder
+        _ATK_STATES if _atk_bot
         else _ECONOMY_STATES if _economy_builder
         else states
     )
@@ -194,6 +197,34 @@ def select_best_state():
     return best_state
 
 
+def atk_symmetry_target():
+    """Explore target for this attack bot: the enemy core under its preferred
+    symmetry, falling back as symmetries are eliminated. atk 0 tries
+    horizontal -> rotational(diagonal) -> vertical; atk 1 tries the reverse
+    axis order. Returns None until our own core is known."""
+    my_core = map_info._my_core
+    if my_core is None:
+        return None
+    if map_info._their_core is not None:
+        return map_info._their_core
+    if _atk_index == 1:
+        order = (
+            (map_info._ver_sym, map_info.ver_flip_core),
+            (map_info._rot_sym, map_info.rot_flip_core),
+            (map_info._hor_sym, map_info.hor_flip_core),
+        )
+    else:
+        order = (
+            (map_info._hor_sym, map_info.hor_flip_core),
+            (map_info._rot_sym, map_info.rot_flip_core),
+            (map_info._ver_sym, map_info.ver_flip_core),
+        )
+    for alive, flip in order:
+        if alive:
+            return flip(my_core)
+    return map_info._predicted_enemy_core
+
+
 def heal_fallback():
     """Heal the best adjacent damaged ally, then self. Shared by the attack and
     defense builders; economy and reinforcement builders skip healing."""
@@ -206,7 +237,7 @@ def _resolve_opening_role():
     """Fold this builder's comms-assigned opening role into the role flags.
     Store writes are buffered, so an unrecognized role is retried each round
     rather than permanently defaulting the builder to a generalist."""
-    global _rush_builder, _economy_builder, _defense_lane, _opening_role_checked
+    global _atk_bot, _atk_index, _economy_builder, _defense_lane, _opening_role_checked
     global _reinforcement_enemy_id, _reinforcement_position, _reinforcement_launched
 
     reinforcement = comms.reinforcement_for_builder(rc.get_id())
@@ -215,12 +246,15 @@ def _resolve_opening_role():
          _reinforcement_launched) = reinforcement
 
     if not _opening_role_checked or (
-        _defense_lane is None and not _rush_builder and not _economy_builder
+        _defense_lane is None and not _atk_bot and not _economy_builder
     ):
         assigned_lane = comms.defender_lane(rc.get_id())
         if assigned_lane is not None:
             _defense_lane = assigned_lane
-        _rush_builder = _rush_builder or comms.is_rusher(rc.get_id())
+        idx = comms.atk_index(rc.get_id())
+        if idx is not None:
+            _atk_bot = True
+            _atk_index = idx
         _economy_builder = _economy_builder or comms.is_economy(rc.get_id())
         _opening_role_checked = True
 
@@ -241,7 +275,7 @@ def run():
     if (
         current_round <= INITIAL_SPAWN_COUNT + 1
         and _defense_lane is None
-        and not _rush_builder
+        and not _atk_bot
         and not _economy_builder
     ):
         return
