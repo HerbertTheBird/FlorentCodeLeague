@@ -1,25 +1,21 @@
-"""Comms — global-store board sharing for Heimdall v0.
+"""Comms — global-store board sharing for Heimdall.
 
 Titan replaced Cambridge's tile markers with a 16-slot per-team integer store.
-Heimdall keeps Loki's compressed map sharing, but reserves six slots for the
-two defensive builder/launcher handoff mailboxes. The board value uses slots
-0..7; slot 8 holds the completed-ring and permanent-PvP flags. Stable rush and
-economy IDs occupy reserved high bits in the two defender builder mailboxes so
-phase-flag writes cannot erase them:
+Heimdall uses slots 0..7 (32 bytes) for a zlib-compressed 4-state map board and
+slots 8..15 for the two defensive builder/launcher handoff mailboxes, the
+opening-role assignments, the gunner counter, and the reinforcement claim.
 
-    bits 0..2   symmetry flags — bit0 horizontal, bit1 vertical, bit2 rotational
-                (1 = still possible, 0 = invalidated). We only start writing once
-                symmetry is confirmed (exactly one flag set).
-    bits 3..    a base-3 number, one digit per tile of the *canonical half* of the
-                board (tiles n with n <= mirror(n)): 0 = empty, 1 = wall,
-                2 = titanium ore. The other half is reconstructed by mirroring
-                under the confirmed symmetry, so the whole map is encoded.
-
-Capacity: 253 bits hold 159 base-3 digits, so on maps whose half-board is larger
-we share the lowest-indexed tiles that fit (walls + ore are what matter). Reading
-folds shared walls/ore into map_info; writing pushes map_info's own knowledge
-back, so the store accumulates the union of everyone's knowledge over time.
+The map is very low entropy, so a whole 4-state half-board (0=unknown, 1=empty,
+2=wall, 3=titanium-ore) compresses into the 8 board slots on nearly every
+competition map. Each unit reads the board, decompresses it, merges in the tiles
+it knows (only ever filling an unknown, never clearing a known one), recompresses
+and writes back — so the store monotonically accumulates the union of everyone's
+observations and multi-writer stays clobber-free under the store's buffered
+last-writer-wins semantics. See the board-layout comment below for the byte
+format and the pre/post-symmetry tile order.
 """
+
+import zlib
 
 import map_info
 from fcode import Controller
@@ -43,29 +39,25 @@ _DEFENDER_CLAIM_BIT = 1 << 30
 _LAUNCHER_ID_MASK = _DEFENDER_CLAIM_BIT - 1
 GUNNER_COUNT_SLOT = 15                               # slot 15: emergency reinforcement claim
 
-# --- Board layout (slots 0..7 = 256 bits) --------------------------------------
-# bits 0..2 : symmetry flags (hor/ver/rot still possible)
-# bits 3..  : one 2-bit digit per canonical-half tile, 0=unknown 1=empty 2=wall
-#             3=titanium-ore.
+# --- Board layout (slots 0..7 = 32 bytes) --------------------------------------
+# byte 0 : symmetry flags (bits 0..2: hor/ver/rot still possible)
+# byte 1 : L = length in bytes of the compressed payload
+# 2..2+L : raw-DEFLATE of a 2-bit-per-tile 4-state stream (0=unknown 1=empty
+#          2=wall 3=titanium-ore) over the current tile order.
 #
-# A single 4-state plane (not a turn%2 double-buffer): the store uses BUFFERED
-# writes, so within a round no unit can see another's write and the board is
-# last-writer-wins. The only thing that keeps a shared board from being clobbered
-# is fold-on-read -> write-back-your-superset: reading folds the board into your
-# own _bm_seen, so when you re-encode your knowledge you preserve everyone
-# else's. That invariant needs the SAME plane every round; a turn%2 scheme whose
-# two rounds carry different planes breaks it (the off-plane write destroys what
-# you'd merge against, so a tile only one unit has seen never propagates).
-#
-# Encoding "unknown" as digit 0 carries the known-vs-unknown distinction the
-# alternating known/unknown plane was meant to provide — sharing a *known-empty*
-# tile (digit 1) is exactly what lets pooled observations eliminate a symmetry —
-# while staying single-plane and merge-safe. apply_shared_tile mirrors folded
-# tiles across the axis once symmetry is solved.
-_DATA_SHIFT = 3
-_TILES = (_BOARD_SLOTS * 32 - _DATA_SHIFT) // 2   # tiles the board can hold
+# The map is very low entropy (mostly empty, clustered walls/ore, and — until
+# fully explored — long runs of unknown), so zlib packs a whole 4-state
+# half-board into well under 32 bytes on nearly every competition map (measured
+# 11..35 B fully explored). Each unit does decode -> merge-its-knowledge ->
+# re-encode -> write, which keeps the union monotonic (you only ever fill an
+# unknown tile, never clear a known one), so multi-writer stays clobber-free
+# under the store's buffered last-writer-wins semantics. If a dense map's stream
+# won't fit, the low-index prefix that does is sent (deterministic, so every
+# writer truncates identically).
+_BOARD_BYTES = _BOARD_SLOTS * 4          # 32
+_BLOB_BUDGET = _BOARD_BYTES - 2          # bytes available after the 2-byte header
 
-# canonical-half tile list (tiles n with n <= mirror(n)), cached per (w,h,sym)
+# tile order, cached per (w, h, sym)
 _primary_cache_key = None
 _primary_tiles: list[int] = []
 
@@ -87,33 +79,21 @@ def _mirror(n: int, w: int, h: int, sym: int) -> int:
 
 
 def _tile_order(w: int, h: int, sym: int) -> list[int]:
-    """Board tile order. Once symmetry is solved we transmit the canonical half
-    (each folded tile is mirrored back on read, covering the whole map); before
-    that we transmit the lowest-indexed tiles so pooled observations can start
-    eliminating symmetries."""
+    """Tile transmission order. Once symmetry is solved we send the canonical
+    half (each folded tile is mirrored back on read, covering the whole map);
+    before that we send the whole board so pooled observations can eliminate
+    symmetries. Compression + prefix truncation handle whatever fits."""
     global _primary_cache_key, _primary_tiles
     key = (w, h, sym)
     if key == _primary_cache_key:
         return _primary_tiles
     if sym in (1, 2, 4):
-        tiles = [n for n in range(w * h) if n <= _mirror(n, w, h, sym)][:_TILES]
+        tiles = [n for n in range(w * h) if n <= _mirror(n, w, h, sym)]
     else:
-        tiles = list(range(min(_TILES, w * h)))
+        tiles = list(range(w * h))
     _primary_cache_key = key
     _primary_tiles = tiles
     return tiles
-
-
-def _read_board() -> int:
-    v = 0
-    for i in range(_BOARD_SLOTS):
-        v |= rc.read_store(i) << (32 * i)
-    return v
-
-
-def _write_board(v: int) -> None:
-    for i in range(_BOARD_SLOTS):
-        rc.write_store(i, (v >> (32 * i)) & 0xFFFFFFFF)
 
 
 def _digit_to_env(digit: int) -> int:
@@ -122,6 +102,73 @@ def _digit_to_env(digit: int) -> int:
     if digit == 2:
         return map_info._IDX_ENV_WALL
     return map_info._IDX_ENV_ORE_TI
+
+
+def _read_board_bytes() -> bytes:
+    out = bytearray(_BOARD_BYTES)
+    for i in range(_BOARD_SLOTS):
+        out[i * 4:i * 4 + 4] = rc.read_store(i).to_bytes(4, "little")
+    return bytes(out)
+
+
+def _write_board_bytes(b: bytes) -> None:
+    b = b[:_BOARD_BYTES].ljust(_BOARD_BYTES, b"\x00")
+    for i in range(_BOARD_SLOTS):
+        rc.write_store(i, int.from_bytes(b[i * 4:i * 4 + 4], "little"))
+
+
+def _deflate(data: bytes) -> bytes:
+    co = zlib.compressobj(9, zlib.DEFLATED, -15)   # raw deflate, no header/checksum
+    return co.compress(data) + co.flush()
+
+
+def _pack_digits(order: list[int], digits: bytearray, k: int) -> bytes:
+    ba = bytearray((k * 2 + 7) // 8)
+    for idx in range(k):
+        d = digits[order[idx]]
+        if d:
+            ba[idx >> 2] |= (d & 3) << ((idx & 3) * 2)
+    return bytes(ba)
+
+
+def _decode_board(board: bytes) -> tuple[int, bytearray]:
+    """Return (sym, digits) where digits[n] in 0..3 for every tile index n."""
+    sym = board[0] & 7
+    length = board[1]
+    digits = bytearray(map_info._width * map_info._height)
+    if length == 0 or 2 + length > len(board):
+        return sym, digits
+    try:
+        raw = zlib.decompressobj(-15).decompress(board[2:2 + length])
+    except Exception:
+        return sym, digits
+    order = _tile_order(map_info._width, map_info._height, sym)
+    for idx, n in enumerate(order):
+        bi = idx >> 2
+        if bi >= len(raw):
+            break
+        d = (raw[bi] >> ((idx & 3) * 2)) & 3
+        if d:
+            digits[n] = d
+    return sym, digits
+
+
+def _encode_board(sym: int, digits: bytearray) -> bytes:
+    order = _tile_order(map_info._width, map_info._height, sym)
+    k = len(order)
+    blob = _deflate(_pack_digits(order, digits, k))
+    if len(blob) > _BLOB_BUDGET:
+        # Send the largest low-index prefix that fits (binary search; deflate
+        # size grows monotonically with the tile count in practice).
+        lo, hi = 0, k
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if len(_deflate(_pack_digits(order, digits, mid))) <= _BLOB_BUDGET:
+                lo = mid
+            else:
+                hi = mid - 1
+        blob = _deflate(_pack_digits(order, digits, lo))
+    return bytes([sym & 7, len(blob)]) + blob
 
 
 _GUNNER_COUNT_MASK = 0xFFFF   # slot 8 low 16 bits (ring/pvp flags live in bits 30/31)
@@ -421,17 +468,13 @@ def update() -> None:
 
 
 def _read() -> None:
-    v = _read_board()
-    sym = v & 7
+    sym, digits = _decode_board(_read_board_bytes())
     if sym:
         # Possible-symmetry flags: every observer intersects them locally.
         map_info.update_symmetry_from_comms(sym)
-    data = v >> _DATA_SHIFT
-    order = _tile_order(map_info._width, map_info._height, sym)
-    for i, n in enumerate(order):
-        digit = (data >> (2 * i)) & 3
-        if digit:      # 0 = unknown -> nothing to fold
-            map_info.apply_shared_tile(n, _digit_to_env(digit))
+    for n, d in enumerate(digits):
+        if d:      # 0 = unknown -> nothing to fold
+            map_info.apply_shared_tile(n, _digit_to_env(d))
 
 
 def _write() -> None:
@@ -440,23 +483,22 @@ def _write() -> None:
         | (2 if map_info._ver_sym else 0)
         | (4 if map_info._rot_sym else 0)
     )
-    v = _read_board()
-    stored_sym = v & 7
+    # Decode what the team has shared, then fill in only tiles I know (never
+    # clearing a known one). This monotonic read-merge-write keeps other units'
+    # contributions from being clobbered under buffered last-writer-wins.
+    stored_sym, digits = _decode_board(_read_board_bytes())
     combined_sym = my_sym if stored_sym == 0 else (my_sym & stored_sym)
-    # Start from the board already there and only OVERWRITE tiles I know — this
-    # read-merge-write is what keeps other units' contributions from being
-    # clobbered under the store's last-writer-wins buffered semantics.
-    data = v >> _DATA_SHIFT
 
     seen = map_info._bm_seen
     wall = map_info._bm_env[map_info._IDX_ENV_WALL]
     ore = map_info._bm_env[map_info._IDX_ENV_ORE_TI]
-    order = _tile_order(map_info._width, map_info._height, my_sym)
-    for i, n in enumerate(order):
+    order = _tile_order(map_info._width, map_info._height, combined_sym)
+    for n in order:
+        if digits[n]:
+            continue      # already known to the team
         bit = 1 << n
         if not (seen & bit):
-            continue      # unknown to me — leave whatever the team already shared
-        digit = 2 if (wall & bit) else (3 if (ore & bit) else 1)
-        data = (data & ~(3 << (2 * i))) | (digit << (2 * i))
+            continue      # unknown to me too
+        digits[n] = 2 if (wall & bit) else (3 if (ore & bit) else 1)
 
-    _write_board(combined_sym | (data << _DATA_SHIFT))
+    _write_board_bytes(_encode_board(combined_sym, digits))
