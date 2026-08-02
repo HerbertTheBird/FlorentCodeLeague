@@ -492,9 +492,18 @@ class Pathing:
                 stuck_turns = 0
             hit = cur_frontier & can_move_to
             if hit:
-                # can_move_to includes our own tile; never pick "stand still" when
-                # a real step is in the same layer.
+                # can_move_to includes our own tile. Prefer standing still over a
+                # same-distance sidestep: if our own tile is in this
+                # first-reachable layer, every move here is the same distance to
+                # the target, so moving wouldn't get us any closer — stay put.
+                # (move_to's stuck-escape still frees us if we wait too long.) We
+                # only sidestep/dodge when there is no strictly-closer step.
                 non_self = hit & ~start_mask
+                if (start_mask & hit) and non_self:
+                    cx = start_n % width
+                    cy = start_n // width
+                    start_pos = Position(cx, cy)
+                    return start_pos, start_pos, i
                 if non_self:
                     hit = non_self
                 elif not (start_mask & target_mask):

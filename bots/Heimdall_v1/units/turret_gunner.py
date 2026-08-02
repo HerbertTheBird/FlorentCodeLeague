@@ -21,7 +21,7 @@ _attackable_by_dir: dict = {}
 # Sentinel-style weights. Builder bots are intentionally absent from rotation
 # scoring per spec — they're only valid as a *current-direction* fire target.
 _WEIGHTS = {
-    EntityType.CORE: 2,
+    EntityType.CORE: 100,
     EntityType.SENTINEL: 50,
     EntityType.LAUNCHER: 10,
     EntityType.HARVESTER: 0,

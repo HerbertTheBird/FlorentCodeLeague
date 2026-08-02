@@ -1604,4 +1604,7 @@ def get_avoid(
         if not (threat & my_bit):
             mask |= threat
         mask |= _bm_enemy_launch_adj
+        # Don't walk in front of our own gunners and block their line of fire
+        # (own tile excluded so a builder already on a ray can still step off).
+        mask |= _bm_my_gunner_claims & ~my_bit
     return mask

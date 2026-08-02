@@ -68,7 +68,7 @@ _NUM_PLANES = 9  # max 511; per-dir scores stay well under in realistic cases
 
 SCORE_THRESHOLD_FACTOR = 0.25
 MIN_ATTACK_SCORE = 16
-THREAT_PENALTY = 4
+THREAT_PENALTY = 8
 
 # Gunner-only knobs. Distance discount: enemy at ray-step k counts as
 # round(score * 0.9^k); k=0 is the tile directly in front of the gunner.
