@@ -918,6 +918,55 @@ def update_symmetry_from_comms(sym_bits):
     if not (sym_bits & 4):
         _rot_sym = False
 
+
+def apply_shared_tile(n: int, env_idx: int) -> bool:
+    """Fold a teammate-shared tile observation (from comms) into local state.
+
+    Faithful mirror of the local-vision environment path in update_at(): record
+    the tile's env + seen bit, then either mirror it across the confirmed axis
+    (post-solve) or run symmetry elimination against already-seen mirror tiles
+    (pre-solve). Sharing *known-empty* tiles — not just walls/ore — is what lets
+    pooled observations eliminate a symmetry, since elimination needs both a
+    tile and its mirror in _bm_seen. Returns True if this tile was new."""
+    global _bm_seen, _hor_sym, _ver_sym, _rot_sym, _struct_version
+    bit = 1 << n
+    if _bm_seen & bit:
+        return False
+    width = _width
+    height = _height
+    x = n % width
+    y = n // width
+    _bm_env[env_idx] |= bit
+    _bm_seen |= bit
+    if _solved_sym:
+        if _hor_sym:
+            fx, fy = width - 1 - x, y
+        elif _ver_sym:
+            fx, fy = x, height - 1 - y
+        else:
+            fx, fy = width - 1 - x, height - 1 - y
+        fbit = 1 << (fx + fy * width)
+        _bm_env[env_idx] |= fbit
+        _bm_seen |= fbit
+    else:
+        rx = width - 1 - x
+        ry = height - 1 - y
+        if _hor_sym:
+            fbit = 1 << (rx + y * width)
+            if (_bm_seen & fbit) and not (_bm_env[env_idx] & fbit):
+                _hor_sym = False
+        if _ver_sym:
+            fbit = 1 << (x + ry * width)
+            if (_bm_seen & fbit) and not (_bm_env[env_idx] & fbit):
+                _ver_sym = False
+        if _rot_sym:
+            fbit = 1 << (rx + ry * width)
+            if (_bm_seen & fbit) and not (_bm_env[env_idx] & fbit):
+                _rot_sym = False
+    if env_idx == _IDX_ENV_WALL:
+        _struct_version += 1
+    return True
+
 # --- 2x2-core-aware reflections -------------------------------------------------
 # The plain flips above reflect a *point* (correct for mirroring walls/ore). The
 # core is a 2x2 block whose top-left origin reflects onto the enemy block's FAR
@@ -1361,29 +1410,34 @@ def update(recompute: bool = True) -> None:
     if _my_core:
         if _their_core:
             _predicted_enemy_core = _their_core
-        else:
-            if _rot_sym:
-                _predicted_enemy_core = rot_flip_core(_my_core)
-            else:
-                hsym_core = hor_flip_core(_my_core)
-                vsym_core = ver_flip_core(_my_core)
-                if _rush_tiebroken == 1 and _ver_sym:
-                    _predicted_enemy_core = vsym_core
-                elif _rush_tiebroken == 2 and _hor_sym:
+        elif _hor_sym or _ver_sym:
+            # Prefer an AXIS (horizontal/vertical) guess over the diagonal
+            # rotational one whenever an axis symmetry is still possible — the
+            # enemy core sitting straight across is the far likelier layout, and
+            # a rotational guess sends the rush across the wrong diagonal.
+            hsym_core = hor_flip_core(_my_core)
+            vsym_core = ver_flip_core(_my_core)
+            if _rush_tiebroken == 1 and _ver_sym:
+                _predicted_enemy_core = vsym_core
+            elif _rush_tiebroken == 2 and _hor_sym:
+                _predicted_enemy_core = hsym_core
+            elif _ver_sym and _hor_sym:
+                if abs(my_pos.x - hsym_core.x) + abs(my_pos.y - hsym_core.y) < abs(my_pos.x - vsym_core.x) + abs(my_pos.y - vsym_core.y):
                     _predicted_enemy_core = hsym_core
-                elif _ver_sym and _hor_sym:
-                    if abs(my_pos.x - hsym_core.x) + abs(my_pos.y - hsym_core.y) < abs(my_pos.x - vsym_core.x) + abs(my_pos.y - vsym_core.y):
-                        _predicted_enemy_core = hsym_core
-                        _rush_tiebroken = 2
-                        log("Tiebreaking enemy core sym - HORIZONTAL")
-                    else:
-                        _predicted_enemy_core = vsym_core
-                        _rush_tiebroken = 1
-                        log("Tiebreaking enemy core sym - VERTICAL")
-                elif _ver_sym:
-                    _predicted_enemy_core = vsym_core
+                    _rush_tiebroken = 2
+                    log("Tiebreaking enemy core sym - HORIZONTAL")
                 else:
-                    _predicted_enemy_core = hsym_core
+                    _predicted_enemy_core = vsym_core
+                    _rush_tiebroken = 1
+                    log("Tiebreaking enemy core sym - VERTICAL")
+            elif _ver_sym:
+                _predicted_enemy_core = vsym_core
+            else:
+                _predicted_enemy_core = hsym_core
+        elif _rot_sym:
+            # Only fall back to the rotational (diagonal) guess when both axis
+            # symmetries have been eliminated.
+            _predicted_enemy_core = rot_flip_core(_my_core)
 
     # --- Update builder bot tracking ---
     _bm_friendly_bots = 0

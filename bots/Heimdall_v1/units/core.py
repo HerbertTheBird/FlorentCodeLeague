@@ -261,10 +261,15 @@ def run():
     # carries emergency defender claims, so count locally-known allied gunners
     # and keep the pool topped up to 2 * (gunners + 1).
     ammo = rc.get_global_ammo()
-    allied_gunners = (
+    # The core's vision is local, so it can't see gunners built out on the map;
+    # counting only locally-visible ones capped the target at 2 (one gunner) and
+    # starved the rest. Use the team-wide counter builders maintain, floored by
+    # whatever the core can see itself.
+    local_gunners = (
         map_info._bm_et[map_info._IDX_GUNNER]
         & map_info._bm_team[map_info._my_team_idx]
     ).bit_count()
+    allied_gunners = max(comms.gunner_count(), local_gunners)
     ammo_target = 2 * (allied_gunners + 1)
     if ammo < ammo_target:
         amt = min(ammo_target - ammo, titanium)

@@ -21,8 +21,6 @@ folds shared walls/ore into map_info; writing pushes map_info's own knowledge
 back, so the store accumulates the union of everyone's knowledge over time.
 """
 
-from math import log2
-
 import map_info
 from fcode import Controller
 
@@ -44,26 +42,38 @@ _INTERCEPT_ACTIVE_BIT = 1 << 31
 _DEFENDER_CLAIM_BIT = 1 << 30
 _LAUNCHER_ID_MASK = _DEFENDER_CLAIM_BIT - 1
 GUNNER_COUNT_SLOT = 15                               # slot 15: emergency reinforcement claim
-_SYM_BITS = 3
-_BOARD_BITS = _BOARD_SLOTS * 32 - _SYM_BITS
-_MAX_TILES = int(_BOARD_BITS / log2(3))
 
-# canonical-half tile list, cached per (w, h, symmetry)
+# --- Board layout (slots 0..7 = 256 bits) --------------------------------------
+# bits 0..2 : symmetry flags (hor/ver/rot still possible)
+# bits 3..  : one 2-bit digit per canonical-half tile, 0=unknown 1=empty 2=wall
+#             3=titanium-ore.
+#
+# A single 4-state plane (not a turn%2 double-buffer): the store uses BUFFERED
+# writes, so within a round no unit can see another's write and the board is
+# last-writer-wins. The only thing that keeps a shared board from being clobbered
+# is fold-on-read -> write-back-your-superset: reading folds the board into your
+# own _bm_seen, so when you re-encode your knowledge you preserve everyone
+# else's. That invariant needs the SAME plane every round; a turn%2 scheme whose
+# two rounds carry different planes breaks it (the off-plane write destroys what
+# you'd merge against, so a tile only one unit has seen never propagates).
+#
+# Encoding "unknown" as digit 0 carries the known-vs-unknown distinction the
+# alternating known/unknown plane was meant to provide — sharing a *known-empty*
+# tile (digit 1) is exactly what lets pooled observations eliminate a symmetry —
+# while staying single-plane and merge-safe. apply_shared_tile mirrors folded
+# tiles across the axis once symmetry is solved.
+_DATA_SHIFT = 3
+_TILES = (_BOARD_SLOTS * 32 - _DATA_SHIFT) // 2   # tiles the board can hold
+
+# canonical-half tile list (tiles n with n <= mirror(n)), cached per (w,h,sym)
 _primary_cache_key = None
 _primary_tiles: list[int] = []
 
-_last_read_v: int | None = None       # last store value we folded into map_info
-_last_written_v: int | None = None    # last value we wrote
-_last_write_map_key = None            # symmetry/wall/ore snapshot at last write
-
 
 def init(c: Controller) -> None:
-    global rc, _primary_cache_key, _last_read_v, _last_written_v, _last_write_map_key
+    global rc, _primary_cache_key
     rc = c
     _primary_cache_key = None
-    _last_read_v = None
-    _last_written_v = None
-    _last_write_map_key = None
 
 
 def _mirror(n: int, w: int, h: int, sym: int) -> int:
@@ -76,42 +86,58 @@ def _mirror(n: int, w: int, h: int, sym: int) -> int:
     return (w - 1 - x) + (h - 1 - y) * w   # rotational
 
 
-def _get_primary(w: int, h: int, sym: int) -> list[int]:
-    """Ordered canonical half: tiles n with n <= mirror(n), capped to what fits."""
+def _tile_order(w: int, h: int, sym: int) -> list[int]:
+    """Board tile order. Once symmetry is solved we transmit the canonical half
+    (each folded tile is mirrored back on read, covering the whole map); before
+    that we transmit the lowest-indexed tiles so pooled observations can start
+    eliminating symmetries."""
     global _primary_cache_key, _primary_tiles
     key = (w, h, sym)
     if key == _primary_cache_key:
         return _primary_tiles
-    tiles = []
-    for n in range(w * h):
-        if n <= _mirror(n, w, h, sym):
-            tiles.append(n)
-            if len(tiles) >= _MAX_TILES:
-                break
+    if sym in (1, 2, 4):
+        tiles = [n for n in range(w * h) if n <= _mirror(n, w, h, sym)][:_TILES]
+    else:
+        tiles = list(range(min(_TILES, w * h)))
     _primary_cache_key = key
     _primary_tiles = tiles
     return tiles
 
 
-def _read_value() -> int:
+def _read_board() -> int:
     v = 0
     for i in range(_BOARD_SLOTS):
         v |= rc.read_store(i) << (32 * i)
     return v
 
 
-def _write_value(v: int) -> None:
+def _write_board(v: int) -> None:
     for i in range(_BOARD_SLOTS):
         rc.write_store(i, (v >> (32 * i)) & 0xFFFFFFFF)
 
 
+def _digit_to_env(digit: int) -> int:
+    if digit == 1:
+        return map_info._IDX_ENV_EMPTY
+    if digit == 2:
+        return map_info._IDX_ENV_WALL
+    return map_info._IDX_ENV_ORE_TI
+
+
+_GUNNER_COUNT_MASK = 0xFFFF   # slot 8 low 16 bits (ring/pvp flags live in bits 30/31)
+
+
 def gunner_count() -> int:
-    """Legacy ammo heuristic; slot 15 now carries emergency defense claims."""
-    return 0
+    """Team-wide count of gunners built. No single unit sees every gunner (core
+    vision is local), so builders bump this shared counter as they build and the
+    core reads it to size ammo conversion."""
+    return rc.read_store(OPENING_ROLE_SLOT) & _GUNNER_COUNT_MASK
 
 
 def note_gunner_built() -> None:
-    return
+    v = rc.read_store(OPENING_ROLE_SLOT)
+    count = (v & _GUNNER_COUNT_MASK) + 1
+    rc.write_store(OPENING_ROLE_SLOT, (v & ~_GUNNER_COUNT_MASK) | (count & _GUNNER_COUNT_MASK))
 
 
 def _handoff_slot(lane: int, field: int) -> int:
@@ -385,14 +411,6 @@ def launcher_handoff(launcher_id: int):
     return None
 
 
-def _apply_tile(n: int, env_idx: int) -> None:
-    bit = 1 << n
-    for e in range(len(map_info._bm_env)):
-        map_info._bm_env[e] &= ~bit
-    map_info._bm_env[env_idx] |= bit
-    map_info._bm_seen |= bit
-
-
 def update() -> None:
     """Called once per builder/launcher round. Fold shared symmetry/map data
     into map_info, then contribute this entity's observations back."""
@@ -403,79 +421,42 @@ def update() -> None:
 
 
 def _read() -> None:
-    global _last_read_v
-    v = _read_value()
-    if v == _last_read_v:
-        return
-    _last_read_v = v
+    v = _read_board()
     sym = v & 7
-    board = v >> _SYM_BITS
     if sym:
-        # Possible-symmetry flags are useful before the team has converged on a
-        # single answer. Every observer intersects them with its local flags.
+        # Possible-symmetry flags: every observer intersects them locally.
         map_info.update_symmetry_from_comms(sym)
-    if sym not in (1, 2, 4) or board == 0:
-        return  # no symmetry-specific board payload usable yet
-
-    w = map_info._width
-    h = map_info._height
-    primary = _get_primary(w, h, sym)
-    wall_idx = map_info._IDX_ENV_WALL
-    ore_idx = map_info._IDX_ENV_ORE_TI
-    seen = map_info._bm_seen
-    changed = False
-    num = board
-    for n in primary:
-        digit = num % 3
-        num //= 3
-        if digit == 0:
-            continue  # empty is ambiguous with "unseen" — leave to local vision
-        env_idx = wall_idx if digit == 1 else ore_idx
-        m = _mirror(n, w, h, sym)
-        for t in (n, m):
-            if not (seen >> t) & 1:      # don't clobber our own direct observations
-                _apply_tile(t, env_idx)
-                changed = True
-    if changed:
-        map_info._struct_version += 1
-        # refresh local `seen` used above is stale after edits, fine for this pass
+    data = v >> _DATA_SHIFT
+    order = _tile_order(map_info._width, map_info._height, sym)
+    for i, n in enumerate(order):
+        digit = (data >> (2 * i)) & 3
+        if digit:      # 0 = unknown -> nothing to fold
+            map_info.apply_shared_tile(n, _digit_to_env(digit))
 
 
 def _write() -> None:
-    global _last_written_v, _last_write_map_key
-    sym = (1 if map_info._hor_sym else 0) | (2 if map_info._ver_sym else 0) | (4 if map_info._rot_sym else 0)
+    my_sym = (
+        (1 if map_info._hor_sym else 0)
+        | (2 if map_info._ver_sym else 0)
+        | (4 if map_info._rot_sym else 0)
+    )
+    v = _read_board()
+    stored_sym = v & 7
+    combined_sym = my_sym if stored_sym == 0 else (my_sym & stored_sym)
+    # Start from the board already there and only OVERWRITE tiles I know — this
+    # read-merge-write is what keeps other units' contributions from being
+    # clobbered under the store's last-writer-wins buffered semantics.
+    data = v >> _DATA_SHIFT
 
-    if not map_info._solved_sym:
-        # Share eliminations immediately, before a single symmetry is known.
-        # Zero in the store means uninitialized; otherwise intersect with the
-        # team's prior possibilities. Preserve the rest of slot 0 verbatim.
-        old_word = rc.read_store(0)
-        shared_sym = old_word & 7
-        combined_sym = sym if shared_sym == 0 else sym & shared_sym
-        if combined_sym != shared_sym:
-            rc.write_store(0, (old_word & ~7) | combined_sym)
-        return
-    if sym not in (1, 2, 4):
-        return
-
+    seen = map_info._bm_seen
     wall = map_info._bm_env[map_info._IDX_ENV_WALL]
     ore = map_info._bm_env[map_info._IDX_ENV_ORE_TI]
-    map_key = (sym, wall, ore)
-    # Unlike _struct_version, this catches newly observed ore as well as walls.
-    if map_key == _last_write_map_key:
-        return
-    _last_write_map_key = map_key
-
-    w = map_info._width
-    h = map_info._height
-    primary = _get_primary(w, h, sym)
-    num = 0
-    for n in reversed(primary):        # primary[0] = least-significant digit
+    order = _tile_order(map_info._width, map_info._height, my_sym)
+    for i, n in enumerate(order):
         bit = 1 << n
-        digit = 1 if (wall & bit) else (2 if (ore & bit) else 0)
-        num = num * 3 + digit
-    v = sym | (num << _SYM_BITS)
-    if v == _last_written_v:
-        return
-    _last_written_v = v
-    _write_value(v)
+        if not (seen & bit):
+            continue      # unknown to me — leave whatever the team already shared
+        digit = 2 if (wall & bit) else (3 if (ore & bit) else 1)
+        data = (data & ~(3 << (2 * i))) | (digit << (2 * i))
+
+    _write_board(combined_sym | (data << _DATA_SHIFT))
