@@ -1,14 +1,17 @@
 """Attack / generalist builder behaviour.
 
-Attack bots travel to the enemy fast by leapfrogging launchers: while still far
-from their symmetry-predicted enemy core they build a launcher toward it and
-hold, and a launcher (this one, or a defender's ring launcher) flings them ~5
-tiles forward — landing them beside the next chain launcher when one exists.
-Once close they fall back to the normal combat/scout states. Generalists (later
-builders, _atk_bot False) just run the full state loop.
+Attack bots use launchers only at the two ends of their trip, never across the
+middle: near base they build a launcher at a planned defender ring site (double
+duty — it defends and flings them outward), then they WALK across the map, and
+once the enemy core is confirmed and close enough that a launcher they build
+could throw them to a tile adjacent to it, they build that final-jump launcher
+and are flung right next to the core. A launcher beside them (theirs or a
+defender's) picks them up and throws them toward the core. Once adjacent they
+fall back to the normal combat/scout states. Generalists (later builders,
+_atk_bot False) just run the full state loop.
 """
 
-from fcode import Direction
+from fcode import Direction, Position
 
 import map_info
 import pathing
@@ -17,16 +20,18 @@ import units.def_states.defense as defense
 
 _CARDINALS = (Direction.NORTH, Direction.EAST, Direction.SOUTH, Direction.WEST)
 
-# Only launch-travel while the target is at least this far (Manhattan); closer in
-# we attack/explore normally.
+# Below this Manhattan distance to the target we attack/explore normally (unless
+# a final jump to the core is available).
 _LAUNCH_MIN_MANHATTAN = 8
 # Keep this much titanium beyond the launcher cost so the economy isn't starved.
 _LAUNCH_RESERVE = 10
 # Turns to hold beside a launcher before giving up and walking.
 _MAX_LAUNCH_WAIT = 3
+# Launcher throw range (dist^2).
+_THROW_RANGE_SQ = 26
 
 _launch_wait = 0
-action = None    # "wait-launch" / "build-launcher" while leapfrogging, for status
+action = None    # "wait-launch" / "build-launcher" / "goto-ring" for status
 
 
 def run() -> None:
@@ -63,9 +68,6 @@ def _travel_by_launcher() -> bool:
     if target is None:
         return False
     my_pos = map_info._my_pos
-    if _manhattan(my_pos, target) < _LAUNCH_MIN_MANHATTAN:
-        _launch_wait = 0
-        return False   # close to the enemy — attack/explore normally
 
     launchers = _friendly_launchers()
     # Beside a friendly launcher: hold still so it can pick us up and fling us.
@@ -78,13 +80,25 @@ def _travel_by_launcher() -> bool:
         return False
     _launch_wait = 0
 
-    # Not beside a launcher and far from the target: get a launcher to be flung
-    # from. Prefer building it where the defenders were going to put one anyway
-    # (a planned ring site ahead of us) so the launcher does double duty; move to
-    # that site if it isn't adjacent yet. Only once past the ring do we drop our
-    # own chain launcher toward the target.
     if rc.get_global_resources() < rc.get_launcher_cost() + map_info.builder_ti_reserve() + _LAUNCH_RESERVE:
         return False
+
+    # FINAL JUMP: once the core is confirmed and a launcher we build could fling
+    # us to a tile adjacent to it, build that launcher. Checked before the close
+    # cutoff so it fires right at the end of the approach.
+    if _core_confident():
+        spot = _final_jump_spot(my_pos, target)
+        if spot is not None:
+            rc.build_launcher(spot)
+            action = "build-launcher"
+            return True
+
+    if _manhattan(my_pos, target) < _LAUNCH_MIN_MANHATTAN:
+        return False   # close, no final jump available — attack/explore normally
+
+    # DEFENSE: build a launcher where the defenders were going to put one anyway
+    # (a planned ring site ahead of us, near base), moving to it if not adjacent.
+    # Nothing is built across the middle of the map — we just walk it.
     site = _nearest_ring_site(my_pos, target)
     if site is not None:
         if _cardinal_adjacent(my_pos, site):
@@ -95,16 +109,59 @@ def _travel_by_launcher() -> bool:
         elif builder.nav.move_to(site):
             action = "goto-ring"
             return True
-    spot = _launcher_spot(my_pos, target, launchers)
-    if spot is not None and rc.can_build_launcher(spot):
-        rc.build_launcher(spot)
-        action = "build-launcher"
-        return True
-    return False
+    return False   # walk the middle — no chain launchers
 
 
 def _cardinal_adjacent(a, b) -> bool:
     return abs(a.x - b.x) + abs(a.y - b.y) == 1
+
+
+def _core_confident() -> bool:
+    """We only commit the final-jump launcher once we actually know where the
+    enemy core is (symmetry confirmed or the core seen), not on a guess."""
+    return map_info._solved_sym or map_info._their_core is not None
+
+
+def _bot_passable(p) -> bool:
+    if not map_info.in_bounds(p):
+        return False
+    bit = 1 << (p.x + p.y * map_info._width)
+    if map_info._bm_env[map_info._IDX_ENV_WALL] & bit:
+        return False
+    if map_info._bm_any_building & bit:
+        return False
+    if (map_info._bm_friendly_bots | map_info._bm_enemy_bots) & bit:
+        return False
+    return True
+
+
+def _enemy_core_ring(core_origin):
+    """Bot-passable tiles cardinally/diagonally around the enemy 2x2 core."""
+    tiles = []
+    for x in range(core_origin.x - 1, core_origin.x + 3):
+        for y in range(core_origin.y - 1, core_origin.y + 3):
+            if core_origin.x <= x <= core_origin.x + 1 and core_origin.y <= y <= core_origin.y + 1:
+                continue  # the core footprint itself
+            p = Position(x, y)
+            if _bot_passable(p):
+                tiles.append(p)
+    return tiles
+
+
+def _final_jump_spot(my_pos, core_origin):
+    """A cardinal neighbour to build a launcher on such that it could throw us to
+    a tile adjacent to the enemy core (within throw range). None if not close
+    enough yet."""
+    ring = _enemy_core_ring(core_origin)
+    if not ring:
+        return None
+    for d in _CARDINALS:
+        launcher = map_info.pos_add(my_pos, d)
+        if not map_info.in_bounds(launcher) or not builder.rc.can_build_launcher(launcher):
+            continue
+        if any(launcher.distance_squared(t) <= _THROW_RANGE_SQ for t in ring):
+            return launcher
+    return None
 
 
 def _nearest_ring_site(my_pos, target):
@@ -125,21 +182,3 @@ def _nearest_ring_site(my_pos, target):
     if not ahead:
         return None
     return min(ahead, key=lambda s: _manhattan(my_pos, s))
-
-
-def _launcher_spot(my_pos, target, launchers):
-    """A cardinal neighbour to build a launcher on: buildable, and — to keep the
-    chain vision-connected — within vision^2 <= 26 of an existing friendly
-    launcher when there is one. Prefer the neighbour closest to the target."""
-    rc = builder.rc
-    candidates = []
-    for d in _CARDINALS:
-        p = map_info.pos_add(my_pos, d)
-        if not map_info.in_bounds(p) or not rc.can_build_launcher(p):
-            continue
-        if launchers and not any(p.distance_squared(lp) <= 26 for lp in launchers):
-            continue    # would break chain vision connectivity
-        candidates.append(p)
-    if not candidates:
-        return None
-    return min(candidates, key=lambda p: _manhattan(p, target))
