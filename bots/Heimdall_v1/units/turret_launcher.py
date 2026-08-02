@@ -354,10 +354,17 @@ def run() -> None:
     comms.update()
     map_info.recompute_derived()
     enemies = _visible_enemy_builders()
-    if enemies:
+    # Base-defense launches only make sense for launchers that actually know
+    # where our base is. Attack-chain launchers are built far out and never see
+    # the core locally (_my_core stays None), so they skip all the lane / ring /
+    # intruder logic — which reads _my_core — and only fling attack bots.
+    has_core = map_info._my_core is not None
+    if enemies and has_core:
         _publish_visible_intruders(enemies)
-    launched_defender = _throw_lane_defender_toward_intruder(enemies)
-    launched_reinforcement = not launched_defender and _throw_reinforcement()
+    launched_defender = has_core and _throw_lane_defender_toward_intruder(enemies)
+    launched_reinforcement = (
+        has_core and not launched_defender and _throw_reinforcement()
+    )
     # Fast-travel: fling an adjacent attack bot toward the enemy core (after the
     # defensive launches, which use different builders and protect the base).
     launched_attacker = (
@@ -373,7 +380,8 @@ def run() -> None:
         and _throw_enemy_away(enemies)
     )
     if (
-        not launched_defender
+        has_core
+        and not launched_defender
         and not launched_reinforcement
         and not launched_attacker
         and not launched_enemy
