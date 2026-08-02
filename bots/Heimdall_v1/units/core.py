@@ -1,7 +1,7 @@
 from fcode import Controller, Direction, Position, EntityType
 import comms
 import map_info
-import units.defense as defense
+import units.def_states.defense as defense
 from units.spawn_plan import choose_spawn_plan, draw_spawn_plan, INITIAL_SPAWN_COUNT, INITIAL_EXPLORE_MAX_STEPS
 
 rc: Controller

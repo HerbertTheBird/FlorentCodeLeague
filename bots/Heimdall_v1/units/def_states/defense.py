@@ -887,7 +887,7 @@ def _run_gunner_pvp() -> None:
         & map_info._bm_visible
     )
     if enemy_buildings:
-        import units.states.attack as attack
+        import units.atk_states.attack as attack
         if attack.score() > 0:
             attack.run()
             return
@@ -940,7 +940,7 @@ def _active_defense(lane: int, planned_site: Position | None) -> None:
     if enemy_buildings:
         # Reuse Loki's proven structure-attack logic without giving the defender
         # access to harvest/route/economy states.
-        import units.states.attack as attack
+        import units.atk_states.attack as attack
         if attack.score() > 0:
             attack.run()
         else:

@@ -3,18 +3,23 @@ from fcode import Controller, Position
 import random
 
 import map_info
-import pathing
 from pathing import Pathing
 import comms
 from units.spawn_plan import get_ray_endpoint, INITIAL_EXPLORE_MAX_STEPS, INITIAL_SPAWN_COUNT
 
-import units.states.explore  as explore
-import units.states.disrupt  as disrupt
-import units.states.harvest  as harvest
-import units.states.route    as route
-import units.states.heal     as heal
-import units.states.attack   as attack
-import units.defense         as defense
+import units.atk_states.explore  as explore
+import units.atk_states.disrupt  as disrupt
+import units.econ_states.harvest as harvest
+import units.econ_states.route   as route
+import units.atk_states.heal     as heal
+import units.atk_states.attack   as attack
+import units.def_states.defense  as defense
+
+# Builder-type behaviour modules. The cycle (they each import this module for
+# shared state) is safe: nothing here touches their attributes at import time.
+import units.atk_builder as atk_builder
+import units.def_builder as def_builder
+import units.econ_builder as econ_builder
 
 from log import DRAW_DEBUG
 
@@ -189,101 +194,67 @@ def select_best_state():
     return best_state
 
 
-def run():
+def heal_fallback():
+    """Heal the best adjacent damaged ally, then self. Shared by the attack and
+    defense builders; economy and reinforcement builders skip healing."""
+    heal._do_best_heal()
+    if rc.can_heal(map_info._my_pos):
+        rc.heal(map_info._my_pos)
+
+
+def _resolve_opening_role():
+    """Fold this builder's comms-assigned opening role into the role flags.
+    Store writes are buffered, so an unrecognized role is retried each round
+    rather than permanently defaulting the builder to a generalist."""
     global _rush_builder, _economy_builder, _defense_lane, _opening_role_checked
     global _reinforcement_enemy_id, _reinforcement_position, _reinforcement_launched
 
-    # Sync round info
-    current_round = rc.get_current_round()
-    map_info.update(recompute=False)
-    handle_comms()
-    map_info.recompute_derived()
     reinforcement = comms.reinforcement_for_builder(rc.get_id())
     if reinforcement is not None:
-        (
-            _reinforcement_enemy_id,
-            _reinforcement_position,
-            _reinforcement_launched,
-        ) = reinforcement
+        (_reinforcement_enemy_id, _reinforcement_position,
+         _reinforcement_launched) = reinforcement
+
     if not _opening_role_checked or (
         _defense_lane is None and not _rush_builder and not _economy_builder
     ):
-        # Global-store writes are buffered. Retry an unrecognized opening role
-        # instead of permanently classifying the builder as a generalist if its
-        # assignment was not visible on its first turn.
         assigned_lane = comms.defender_lane(rc.get_id())
         if assigned_lane is not None:
             _defense_lane = assigned_lane
         _rush_builder = _rush_builder or comms.is_rusher(rc.get_id())
         _economy_builder = _economy_builder or comms.is_economy(rc.get_id())
         _opening_role_checked = True
+
+
+def run():
+    # Sync round info + shared state, resolve role, then dispatch to the
+    # matching builder-type module (each owns its own rebuild/heal policy).
+    current_round = rc.get_current_round()
+    map_info.update(recompute=False)
+    handle_comms()
+    map_info.recompute_derived()
+
+    _resolve_opening_role()
     _update_harvest_zone()
 
+    # An opening assignment may be one buffered round late; wait rather than run
+    # a would-be specialist as a generalist for a turn.
     if (
         current_round <= INITIAL_SPAWN_COUNT + 1
         and _defense_lane is None
         and not _rush_builder
         and not _economy_builder
     ):
-        # An opening assignment may be one buffered-store round late. Waiting
-        # is safer than allowing a would-be economy builder one general/combat
-        # turn before its permanent role becomes visible.
         return
 
-    # First few builder bots derive explore target from spawn position
     _update_initial_explore(current_round)
 
-    # Combat/general builders may repair barriers they broke while pathing.
-    # Economy specialists leave all defensive construction to other roles.
-    if (
-        _defense_lane is None
-        and not _economy_builder
-        and not _reinforcement_enemy_id
-    ):
-        pathing.rebuild_broken_barriers(rc)
-
-    # Run state-specific logic
-    # Economy is an overriding role. Even if a stale mailbox ever makes role
-    # data ambiguous, this builder can only enter harvest/route dispatch and
-    # can never reach defense, attack, disrupt, or heal gunner construction.
+    # Dispatch (order matches the original precedence):
+    #   reinforcement > economy > defense lane > attack/generalist.
     if _reinforcement_enemy_id:
-        defense.run_reinforcement(
-            _reinforcement_enemy_id,
-            _reinforcement_position,
-            _reinforcement_launched,
-        )
+        def_builder.run_reinforcement()
     elif _economy_builder:
-        best_state = select_best_state()
-        if best_state is not None:
-            best_state.run()
+        econ_builder.run()
     elif _defense_lane is not None:
-        if defense.run(_defense_lane):
-            # Lane 0 permanently becomes a second economy builder once the
-            # original ring is complete. Lane 1 remains its dedicated patrol.
-            _defense_lane = None
-            _economy_builder = True
-            best_state = select_best_state()
-            if best_state is not None:
-                best_state.run()
+        def_builder.run()
     else:
-        best_state = select_best_state()
-        if best_state is not None:
-            best_state.run()
-
-
-    if not _economy_builder and not _reinforcement_enemy_id:
-        # Healing is defense work; economy specialists remain dedicated to
-        # harvesters and conveyor routes even when they would otherwise idle.
-        heal._do_best_heal()
-
-        # Fall back to healing self
-        if rc.can_heal(map_info._my_pos):
-            rc.heal(map_info._my_pos)
-
-    # (Titan: conveyors cannot feed enemy turrets — turrets take no resources —
-    # so Khaos's feeder-teardown, which destroyed OUR OWN conveyors and harvesters
-    # near enemy turrets, is gone.)
-
-    # TITAN: road-spam (map control by forcing enemies to clear roads first) is
-    # gone — roads don't exist and empty tiles are walkable. Symmetry broadcast
-    # is gone too — comms used tile markers, which Titan removed. Both dropped.
+        atk_builder.run()

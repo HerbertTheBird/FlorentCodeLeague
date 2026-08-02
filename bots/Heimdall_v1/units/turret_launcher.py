@@ -4,7 +4,7 @@ from fcode import Controller, Direction, EntityType, Position
 
 import comms
 import map_info
-import units.defense as defense
+import units.def_states.defense as defense
 
 
 rc: Controller = None
