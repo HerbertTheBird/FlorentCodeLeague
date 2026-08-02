@@ -238,35 +238,51 @@ def _handoff_slot(lane: int, field: int) -> int:
 
 # Opening role ids in the two defender mailboxes: attack builder in the high bits
 # (slot 9 = atk 0, slot 12 = atk 1), lane defender in the low 16. Both are written
-# together by rebroadcast_lane(). The economy builder lives in slot 8 bits 16..29
+# together by rebroadcast_opening(). Economy 0 lives in slot 8 bits 16..29
 # (low 16 = gunner counter, bits 30/31 = ring/pvp flags).
 _ECON_ID_SHIFT = 16
 _ECON_ID_MASK = 0x3FFF
 
 
 def atk_index(builder_id: int):
-    """Return which attack slot (0 or 1) this builder was assigned, else None."""
+    """Return which attack slot (0, 1, or 2) this builder was assigned, else None.
+
+    Heimdall_v2 opening = 3 attackers / 2 economy / no defenders. With defenders
+    gone, the two lane mailboxes' low-16 (former defender-id) fields are free:
+    attacker 2 rides slot9's low 16, economy 1 rides slot12's low 16."""
     if not builder_id:
         return None
-    for index in (0, 1):
-        value = rc.read_store(_handoff_slot(index, 0))
-        if ((value >> _MAILBOX_ROLE_SHIFT) & _ROLE_ID_MASK) == builder_id:
-            return index
+    if ((rc.read_store(_handoff_slot(0, 0)) >> _MAILBOX_ROLE_SHIFT) & _ROLE_ID_MASK) == builder_id:
+        return 0
+    if ((rc.read_store(_handoff_slot(1, 0)) >> _MAILBOX_ROLE_SHIFT) & _ROLE_ID_MASK) == builder_id:
+        return 1
+    if (rc.read_store(_handoff_slot(0, 0)) & 0xFFFF) == builder_id:
+        return 2
     return None
 
 
-def rebroadcast_lane(lane: int, atk_id: int, def_id: int) -> None:
-    """Write a lane's mailbox role ids in ONE store write — attack builder in the
-    high bits, lane defender in the low 16. Separate assign_atk / assign_defender
-    calls in the same round would clobber each other: buffered writes mean the
-    second reads the pre-round value and overwrites the first's field."""
-    slot = _handoff_slot(lane, 0)
-    v = rc.read_store(slot)
-    if atk_id:
-        v = (v & ~(_ROLE_ID_MASK << _MAILBOX_ROLE_SHIFT)) | ((atk_id & _ROLE_ID_MASK) << _MAILBOX_ROLE_SHIFT)
-    if def_id:
-        v = (v & 0xFFFF0000) | (def_id & 0xFFFF)
-    rc.write_store(slot, v)
+def rebroadcast_opening(atk_ids, econ_ids) -> None:
+    """Broadcast the 3-attack / 2-economy opening role ids. Each lane word is
+    written once (attacker high bits + repurposed low 16) so the two fields don't
+    clobber each other under buffered last-writer-wins."""
+    slot0 = _handoff_slot(0, 0)
+    v0 = rc.read_store(slot0)
+    if atk_ids[0]:
+        v0 = (v0 & ~(_ROLE_ID_MASK << _MAILBOX_ROLE_SHIFT)) | ((atk_ids[0] & _ROLE_ID_MASK) << _MAILBOX_ROLE_SHIFT)
+    if len(atk_ids) > 2 and atk_ids[2]:
+        v0 = (v0 & 0xFFFF0000) | (atk_ids[2] & 0xFFFF)
+    rc.write_store(slot0, v0)
+
+    slot1 = _handoff_slot(1, 0)
+    v1 = rc.read_store(slot1)
+    if atk_ids[1]:
+        v1 = (v1 & ~(_ROLE_ID_MASK << _MAILBOX_ROLE_SHIFT)) | ((atk_ids[1] & _ROLE_ID_MASK) << _MAILBOX_ROLE_SHIFT)
+    if len(econ_ids) > 1 and econ_ids[1]:
+        v1 = (v1 & 0xFFFF0000) | (econ_ids[1] & 0xFFFF)
+    rc.write_store(slot1, v1)
+
+    if econ_ids[0]:
+        assign_economy(econ_ids[0])
 
 
 def assign_economy(builder_id: int) -> None:
@@ -279,7 +295,10 @@ def is_economy(builder_id: int) -> bool:
     if not builder_id:
         return False
     v = rc.read_store(OPENING_ROLE_SLOT)
-    return ((v >> _ECON_ID_SHIFT) & _ECON_ID_MASK) == (builder_id & _ECON_ID_MASK)
+    if ((v >> _ECON_ID_SHIFT) & _ECON_ID_MASK) == (builder_id & _ECON_ID_MASK):
+        return True
+    # economy 1 rides lane-1's low 16 (former defender field).
+    return (rc.read_store(_handoff_slot(1, 0)) & 0xFFFF) == builder_id
 
 
 def mark_ring_complete() -> None:
@@ -310,10 +329,9 @@ def gunner_pvp() -> bool:
 
 
 def defender_lane(builder_id: int) -> int | None:
-    """Return this builder's defense lane, or None for rush/economy bots."""
-    for lane in (0, 1):
-        if (rc.read_store(_handoff_slot(lane, 0)) & 0xFFFF) == builder_id:
-            return lane
+    """Heimdall_v2 has no opening defenders (3-attack / 2-economy opening), and
+    the lane words' low-16 fields now carry attacker-2 / economy-1 ids, so this
+    must never resolve a builder as a defender."""
     return None
 
 
