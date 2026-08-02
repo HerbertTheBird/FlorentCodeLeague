@@ -989,6 +989,56 @@ def flip_core(pos: Position) -> Position | None:
         return rot_flip_core(pos)
     return None
 
+_shared_core: Position | None = None   # core position learned via comms
+
+
+def note_shared_core(pos: Position) -> None:
+    """Record the core position shared over comms so units that never saw the
+    core themselves (e.g. a launcher built far out) can still locate it."""
+    global _shared_core
+    _shared_core = pos
+
+
+def atk_symmetry_target(atk_index):
+    """Enemy-core target for attack builder ``atk_index``. Once symmetry is
+    confirmed, both attackers converge on the real predicted enemy core; before
+    that each guesses a different axis, falling back as axes are eliminated
+    (index 0: horizontal -> rotational(diagonal) -> vertical; index 1 reversed).
+    Returns None until our own core is known (locally or via comms). Shared by
+    the attack builder (explore target) and the launcher (throw target) so both
+    derive the same destination from the same symmetry/map state."""
+    core = _my_core or _shared_core
+    if core is None:
+        return None
+    if _their_core is not None:
+        return _their_core
+    if _solved_sym:
+        # Confirmed symmetry: the single surviving axis gives the real core.
+        if _my_core is not None and _predicted_enemy_core is not None:
+            return _predicted_enemy_core
+        if _hor_sym:
+            return hor_flip_core(core)
+        if _ver_sym:
+            return ver_flip_core(core)
+        return rot_flip_core(core)
+    if atk_index == 1:
+        order = (
+            (_ver_sym, ver_flip_core),
+            (_rot_sym, rot_flip_core),
+            (_hor_sym, hor_flip_core),
+        )
+    else:
+        order = (
+            (_hor_sym, hor_flip_core),
+            (_rot_sym, rot_flip_core),
+            (_ver_sym, ver_flip_core),
+        )
+    for alive, flip in order:
+        if alive:
+            return flip(core)
+    return _predicted_enemy_core
+
+
 def core_origin(core_id: int, tile: Position) -> Position | None:
     """Top-left origin of the 2x2 core block containing an observed core tile.
 

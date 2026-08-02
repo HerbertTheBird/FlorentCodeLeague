@@ -204,31 +204,9 @@ def select_best_state():
 
 
 def atk_symmetry_target():
-    """Explore target for this attack bot: the enemy core under its preferred
-    symmetry, falling back as symmetries are eliminated. atk 0 tries
-    horizontal -> rotational(diagonal) -> vertical; atk 1 tries the reverse
-    axis order. Returns None until our own core is known."""
-    my_core = map_info._my_core
-    if my_core is None:
-        return None
-    if map_info._their_core is not None:
-        return map_info._their_core
-    if _atk_index == 1:
-        order = (
-            (map_info._ver_sym, map_info.ver_flip_core),
-            (map_info._rot_sym, map_info.rot_flip_core),
-            (map_info._hor_sym, map_info.hor_flip_core),
-        )
-    else:
-        order = (
-            (map_info._hor_sym, map_info.hor_flip_core),
-            (map_info._rot_sym, map_info.rot_flip_core),
-            (map_info._ver_sym, map_info.ver_flip_core),
-        )
-    for alive, flip in order:
-        if alive:
-            return flip(my_core)
-    return map_info._predicted_enemy_core
+    """This attack bot's symmetry-predicted enemy core (see
+    map_info.atk_symmetry_target)."""
+    return map_info.atk_symmetry_target(_atk_index)
 
 
 def heal_fallback():
@@ -320,6 +298,8 @@ def _log_status():
         state, target = "mirror", _reinforcement_position
     elif _defense_lane is not None and not _economy_builder:
         state, target = "defense", getattr(defense, "target", None)
+    elif _atk_bot and atk_builder.action is not None:
+        state, target = atk_builder.action, atk_symmetry_target()
     elif _chosen_state is not None:
         state = _chosen_state.__name__.rsplit(".", 1)[-1]
         target = getattr(_chosen_state, "target", None)

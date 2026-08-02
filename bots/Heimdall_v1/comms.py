@@ -42,7 +42,9 @@ GUNNER_COUNT_SLOT = 15                               # slot 15: emergency reinfo
 # --- Board layout (slots 0..7 = 32 bytes) --------------------------------------
 # byte 0 : symmetry flags (bits 0..2: hor/ver/rot still possible)
 # byte 1 : L = length in bytes of the compressed payload
-# 2..2+L : raw-DEFLATE of a 2-bit-per-tile 4-state stream (0=unknown 1=empty
+# byte 2 : our core x + 1  (0 = unknown) — shared so units that never saw the
+# byte 3 : our core y + 1    core (e.g. a launcher built far out) can locate it
+# 4..4+L : raw-DEFLATE of a 2-bit-per-tile 4-state stream (0=unknown 1=empty
 #          2=wall 3=titanium-ore) over the current tile order.
 #
 # The map is very low entropy (mostly empty, clustered walls/ore, and — until
@@ -55,7 +57,10 @@ GUNNER_COUNT_SLOT = 15                               # slot 15: emergency reinfo
 # won't fit, the low-index prefix that does is sent (deterministic, so every
 # writer truncates identically).
 _BOARD_BYTES = _BOARD_SLOTS * 4          # 32
-_BLOB_BUDGET = _BOARD_BYTES - 2          # bytes available after the 2-byte header
+_CORE_X_BYTE = 2
+_CORE_Y_BYTE = 3
+_BLOB_START = 4                          # sym(1) + len(1) + core x/y(2)
+_BLOB_BUDGET = _BOARD_BYTES - _BLOB_START
 
 # tile order, cached per (w, h, sym)
 _primary_cache_key = None
@@ -131,17 +136,19 @@ def _pack_digits(order: list[int], digits: bytearray, k: int) -> bytes:
     return bytes(ba)
 
 
-def _decode_board(board: bytes) -> tuple[int, bytearray]:
-    """Return (sym, digits) where digits[n] in 0..3 for every tile index n."""
+def _decode_board(board: bytes):
+    """Return (sym, digits, core_bytes). digits[n] in 0..3 for each tile n;
+    core_bytes is the raw 2-byte core-position field (preserved on rewrite)."""
     sym = board[0] & 7
     length = board[1]
+    core_bytes = board[_CORE_X_BYTE:_CORE_Y_BYTE + 1]
     digits = bytearray(map_info._width * map_info._height)
-    if length == 0 or 2 + length > len(board):
-        return sym, digits
+    if length == 0 or _BLOB_START + length > len(board):
+        return sym, digits, core_bytes
     try:
-        raw = zlib.decompressobj(-15).decompress(board[2:2 + length])
+        raw = zlib.decompressobj(-15).decompress(board[_BLOB_START:_BLOB_START + length])
     except Exception:
-        return sym, digits
+        return sym, digits, core_bytes
     order = _tile_order(map_info._width, map_info._height, sym)
     for idx, n in enumerate(order):
         bi = idx >> 2
@@ -150,10 +157,10 @@ def _decode_board(board: bytes) -> tuple[int, bytearray]:
         d = (raw[bi] >> ((idx & 3) * 2)) & 3
         if d:
             digits[n] = d
-    return sym, digits
+    return sym, digits, core_bytes
 
 
-def _encode_board(sym: int, digits: bytearray) -> bytes:
+def _encode_board(sym: int, digits: bytearray, core_bytes: bytes) -> bytes:
     order = _tile_order(map_info._width, map_info._height, sym)
     k = len(order)
     blob = _deflate(_pack_digits(order, digits, k))
@@ -168,7 +175,16 @@ def _encode_board(sym: int, digits: bytearray) -> bytes:
             else:
                 hi = mid - 1
         blob = _deflate(_pack_digits(order, digits, lo))
-    return bytes([sym & 7, len(blob)]) + blob
+    return bytes([sym & 7, len(blob)]) + bytes(core_bytes[:2]).ljust(2, b"\x00") + blob
+
+
+def publish_core_pos(pos) -> None:
+    """Core publishes its position into the board header (byte offset +1 so an
+    unset field reads as 0). Preserves the rest of the board."""
+    board = bytearray(_read_board_bytes())
+    board[_CORE_X_BYTE] = (pos.x + 1) & 0xFF
+    board[_CORE_Y_BYTE] = (pos.y + 1) & 0xFF
+    _write_board_bytes(bytes(board))
 
 
 _GUNNER_COUNT_MASK = 0xFFFF   # slot 8 low 16 bits (ring/pvp flags live in bits 30/31)
@@ -481,10 +497,13 @@ def update() -> None:
 
 
 def _read() -> None:
-    sym, digits = _decode_board(_read_board_bytes())
+    sym, digits, core_bytes = _decode_board(_read_board_bytes())
     if sym:
         # Possible-symmetry flags: every observer intersects them locally.
         map_info.update_symmetry_from_comms(sym)
+    if core_bytes[0] and core_bytes[1]:
+        from fcode import Position
+        map_info.note_shared_core(Position(core_bytes[0] - 1, core_bytes[1] - 1))
     for n, d in enumerate(digits):
         if d:      # 0 = unknown -> nothing to fold
             map_info.apply_shared_tile(n, _digit_to_env(d))
@@ -498,8 +517,9 @@ def _write() -> None:
     )
     # Decode what the team has shared, then fill in only tiles I know (never
     # clearing a known one). This monotonic read-merge-write keeps other units'
-    # contributions from being clobbered under buffered last-writer-wins.
-    stored_sym, digits = _decode_board(_read_board_bytes())
+    # contributions from being clobbered under buffered last-writer-wins. The
+    # core-position bytes are preserved verbatim.
+    stored_sym, digits, core_bytes = _decode_board(_read_board_bytes())
     combined_sym = my_sym if stored_sym == 0 else (my_sym & stored_sym)
 
     seen = map_info._bm_seen
@@ -514,4 +534,4 @@ def _write() -> None:
             continue      # unknown to me too
         digits[n] = 2 if (wall & bit) else (3 if (ore & bit) else 1)
 
-    _write_board_bytes(_encode_board(combined_sym, digits))
+    _write_board_bytes(_encode_board(combined_sym, digits, core_bytes))

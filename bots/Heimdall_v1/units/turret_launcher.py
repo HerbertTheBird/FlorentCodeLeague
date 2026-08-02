@@ -45,6 +45,90 @@ def _distance_from_core(pos: Position) -> int:
     )
 
 
+def _manhattan(a: Position, b: Position) -> int:
+    return abs(a.x - b.x) + abs(a.y - b.y)
+
+
+def _bot_passable(p: Position) -> bool:
+    """A launch destination must be an in-bounds, non-wall, unoccupied tile."""
+    if not map_info.in_bounds(p):
+        return False
+    bit = 1 << (p.x + p.y * map_info._width)
+    if map_info._bm_env[map_info._IDX_ENV_WALL] & bit:
+        return False
+    if map_info._bm_any_building & bit:
+        return False
+    if (map_info._bm_friendly_bots | map_info._bm_enemy_bots) & bit:
+        return False
+    return True
+
+
+def _friendly_launchers() -> list[Position]:
+    mine = (
+        map_info._bm_et[map_info._IDX_LAUNCHER]
+        & map_info._bm_team[map_info._my_team_idx]
+    )
+    return list(map_info.iter_mask(mine))
+
+
+def _attacker_launch_dest(target: Position) -> Position | None:
+    """Where to fling an attack bot: adjacent to the closest-to-target friendly
+    launcher we can reach (so it leapfrogs down the chain), else the reachable
+    tile nearest to the target by Manhattan distance."""
+    my_pos = rc.get_position()
+    attackable = [t for t in rc.get_attackable_tiles() if _bot_passable(t)]
+    if not attackable:
+        return None
+
+    # A visible friendly launcher strictly closer to the target than we are —
+    # if we can drop the bot right next to it, do so.
+    best_launcher = None
+    best_manh = _manhattan(my_pos, target)
+    for lp in _friendly_launchers():
+        if lp == my_pos:
+            continue
+        m = _manhattan(lp, target)
+        if m < best_manh:
+            best_manh = m
+            best_launcher = lp
+    if best_launcher is not None:
+        adjacent = [
+            t for t in attackable
+            if max(abs(t.x - best_launcher.x), abs(t.y - best_launcher.y)) <= 1
+        ]
+        if adjacent:
+            return min(adjacent, key=lambda t: _manhattan(t, target))
+
+    return min(attackable, key=lambda t: _manhattan(t, target))
+
+
+def _throw_attacker() -> bool:
+    """Fling an adjacent attack builder toward its symmetry-predicted enemy core.
+    The launcher reads the bot's id, recovers its attack index from comms, and
+    computes the target itself (it knows the same symmetry and map)."""
+    my_pos = rc.get_position()
+    my_team = rc.get_team()
+    for entity_id in rc.get_nearby_units():
+        if rc.get_entity_type(entity_id) != EntityType.BUILDER_BOT:
+            continue
+        if rc.get_team(entity_id) != my_team:
+            continue
+        bot_pos = rc.get_position(entity_id)
+        if max(abs(bot_pos.x - my_pos.x), abs(bot_pos.y - my_pos.y)) > 1:
+            continue  # outside pickup range (dist^2 <= 2)
+        idx = comms.atk_index(entity_id)
+        if idx is None:
+            continue  # not an attack builder
+        target = map_info.atk_symmetry_target(idx)
+        if target is None:
+            continue
+        dest = _attacker_launch_dest(target)
+        if dest is not None and rc.can_launch(bot_pos, dest):
+            rc.launch(bot_pos, dest)
+            return True
+    return False
+
+
 def _throw_enemy_away(enemies: list[tuple[int, Position]]) -> bool:
     """Launch an adjacent enemy to the legal tile farthest from our core."""
     my_pos = rc.get_position()
@@ -274,11 +358,26 @@ def run() -> None:
         _publish_visible_intruders(enemies)
     launched_defender = _throw_lane_defender_toward_intruder(enemies)
     launched_reinforcement = not launched_defender and _throw_reinforcement()
+    # Fast-travel: fling an adjacent attack bot toward the enemy core (after the
+    # defensive launches, which use different builders and protect the base).
+    launched_attacker = (
+        not launched_defender
+        and not launched_reinforcement
+        and _throw_attacker()
+    )
     launched_enemy = (
         not launched_defender
         and not launched_reinforcement
+        and not launched_attacker
         and bool(enemies)
         and _throw_enemy_away(enemies)
     )
-    if not launched_defender and not launched_reinforcement and not launched_enemy and _handoff_pending and _throw_assigned_builder():
+    if (
+        not launched_defender
+        and not launched_reinforcement
+        and not launched_attacker
+        and not launched_enemy
+        and _handoff_pending
+        and _throw_assigned_builder()
+    ):
         _handoff_pending = False

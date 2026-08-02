@@ -217,6 +217,9 @@ def run():
     #     rc.resign()
     # Sync round info
     map_info.update()
+    # Publish our position so units that never see the core (e.g. a launcher
+    # built far out) can still compute symmetry targets.
+    comms.publish_core_pos(map_info._my_pos)
     titanium = rc.get_global_resources()
 
 
