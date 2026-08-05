@@ -1,4 +1,5 @@
-from cambc import Controller, Position
+from main import has_op
+from fcode import Controller, Position
 
 import random
 
@@ -14,7 +15,6 @@ import units.states.harvest  as harvest
 import units.states.route    as route
 import units.states.heal     as heal
 import units.states.attack   as attack
-import units.states.secure   as secure
 
 from log import DRAW_DEBUG
 
@@ -22,12 +22,9 @@ from log import DRAW_DEBUG
 rc: Controller
 nav: Pathing = None
 
-WAIT_FOR_CHOKEPOINT = True
-_waiting_for_chokepoint = False
-
 # Sorted in descending order of max score to allow early break in selection loop
 states = tuple(sorted(
-    [explore, disrupt, harvest, route, heal, attack, secure],
+    [explore, disrupt, harvest, route, heal, attack],
     key=lambda s: s.MAX_SCORE,
     reverse=True
 ))
@@ -89,43 +86,6 @@ def draw_mask(mask, r, g, b):
         return
     for p in map_info.iter_mask(mask):
         rc.draw_indicator_dot(p, r, g, b)
-
-
-def wait_for_chokepoint() -> None:
-    global _waiting_for_chokepoint
-    _waiting_for_chokepoint = True
-
-
-def handle_comms():
-    for v, _sender_pos, marker_pos, _marker_id, _estimated_turn in comms.get_new_messages():
-        if not map_info._solved_sym:
-            sym = comms.decode_sym(v)
-            map_info.update_symmetry_from_comms(sym)
-        if comms.decode_type(v) == comms.TYPE_SYMMETRY_BROADCAST:
-            corresponding_pos = comms.decode_learn_map_corresponding_pos(v)
-            sample_bits = comms.decode_learn_map_sample_bits(v)
-            comms.apply_symmetry_broadcast_map(marker_pos, corresponding_pos, sample_bits)
-
-def _pick_symmetry_broadcast_pos() -> Position:
-    width = map_info._width
-    height = map_info._height
-    my_pos = map_info._my_pos
-    my_x = my_pos.x
-    my_y = my_pos.y
-    seen = map_info._bm_seen
-
-    for _ in range(40):
-        x = random.randint(0, width - 1)
-        y = random.randint(0, height - 1)
-        dx = x - my_x
-        dy = y - my_y
-        if dx * dx + dy * dy <= 13:
-            continue
-        if not (seen & (1 << (x + y * width))):
-            continue
-        return Position(x, y)
-
-    return my_pos
 
 
 def _compute_voronoi_harvest_zone():
@@ -220,8 +180,7 @@ def select_best_state():
 
 
 def run():
-    global _waiting_for_chokepoint, _stay_near_core, _first_run_done
-    _waiting_for_chokepoint = False
+    global _stay_near_core, _first_run_done
 
     # Sync round info
     current_round = rc.get_current_round()
@@ -230,212 +189,18 @@ def run():
         if current_round == 1:
             _stay_near_core = True
     map_info.update(recompute=False)
-    handle_comms()
+    comms.update()          # absorb every slot's shared tiles/symmetry, broadcast our own
     map_info.recompute_derived()
     _update_harvest_zone()
 
     # First few builder bots derive explore target from spawn position
     _update_initial_explore(current_round)
 
-    # If we broke barrier last turn, try rebuilding first
-    pathing.rebuild_broken_barriers(rc)
-
     # Run state-specific logic
     best_state = select_best_state()
     best_state.run()
 
-    explore.try_passive_chokepoint_action_only()
 
 
     # Try healing adjacent building
     heal._do_best_heal()
-
-    # Fall back to healing self
-    if rc.can_heal(map_info._my_pos):
-        rc.heal(map_info._my_pos)
-
-    # Tear down any of our own conveyors that are feeding an enemy turret
-    _destroy_enemy_feeders()
-
-    # TITAN: road-spam (map control by forcing enemies to clear roads first) is
-    # gone — roads don't exist and empty tiles are walkable. Symmetry broadcast
-    # is gone too — comms used tile markers, which Titan removed. Both dropped.
-
-
-def _destroy_enemy_feeders():
-    """End-of-turn cleanup over the 3x3 around me (8 directions + own tile):
-    if a friendly conveyor / armoured conveyor / bridge outputs onto a tile
-    occupied by an enemy turret (gunner/sentinel/breach/launcher), destroy
-    it. destroy() does not cost action cooldown, so if cooldown was already
-    0 we then try to reclaim the freed tile. After feeder teardown, also
-    remove adjacent friendly harvesters that are cardinally adjacent to an
-    enemy turret and have no qualifying adjacent allied building support.
-    Exits after the first action."""
-
-    def _try_reclaim_destroyed_tile(p: Position, tile_bit: int) -> None:
-        if rc.get_action_cooldown() != 0:
-            return
-        enemy_bots = map_info._bm_enemy_bots
-        threatened = bool(enemy_bots and (tile_bit & map_info.expand_chebyshev(enemy_bots, 2)))
-        reserve = map_info.builder_ti_reserve()
-        ti_have = rc.get_global_resources()[0]
-        if threatened and rc.can_build_barrier(p) and ti_have >= rc.get_barrier_cost()[0] + reserve:
-            rc.build_barrier(p)
-            map_info.update_at(p)
-        elif rc.can_build_road(p) and ti_have >= rc.get_road_cost()[0] + reserve:
-            rc.build_road(p)
-            map_info.update_at(p)
-
-    w = map_info._width
-    my_pos = map_info._my_pos
-    my_bit = 1 << (my_pos.x + my_pos.y * w)
-    region = map_info.expand_chebyshev(my_bit)
-
-    my_team_idx = map_info._my_team_idx
-    my_feeders = (
-        map_info._bm_et[map_info._IDX_CONVEYOR]
-        | map_info._bm_et[map_info._IDX_ARMOURED_CONVEYOR]
-        | map_info._bm_et[map_info._IDX_BRIDGE]
-    ) & map_info._bm_team[my_team_idx] & region
-
-    enemy_turrets = (
-        map_info._bm_et[map_info._IDX_GUNNER]
-        | map_info._bm_et[map_info._IDX_SENTINEL]
-        | map_info._bm_et[map_info._IDX_BREACH]
-        | map_info._bm_et[map_info._IDX_LAUNCHER]
-    ) & map_info._bm_team[1 - my_team_idx]
-    if not enemy_turrets:
-        return
-
-    mask = my_feeders
-    while mask:
-        lsb = mask & -mask
-        if map_info._conveyor_target_tiles(lsb) & enemy_turrets:
-            n = lsb.bit_length() - 1
-            p = Position(n % w, n // w)
-            if rc.can_destroy(p):
-                rc.destroy(p)
-                map_info.update_at(p)
-                _try_reclaim_destroyed_tile(p, lsb)
-                return
-        mask ^= lsb
-
-    my_harvesters = (
-        map_info._bm_et[map_info._IDX_HARVESTER]
-        & map_info._bm_team[my_team_idx]
-        & region
-    )
-    if not my_harvesters:
-        return
-
-    allied_support = map_info._bm_team[my_team_idx] & ~(
-        map_info._bm_et[map_info._IDX_ROAD]
-        | map_info._bm_et[map_info._IDX_MARKER]
-        | map_info._bm_et[map_info._IDX_LAUNCHER]
-    )
-
-    mask = my_harvesters
-    while mask:
-        lsb = mask & -mask
-        cardinal = map_info.expand_manhattan(lsb) & ~lsb
-        if (cardinal & enemy_turrets) and not (cardinal & allied_support):
-            n = lsb.bit_length() - 1
-            p = Position(n % w, n // w)
-            if rc.can_destroy(p):
-                rc.destroy(p)
-                map_info.update_at(p)
-                _try_reclaim_destroyed_tile(p, lsb)
-                return
-        mask ^= lsb
-
-
-def _try_mask(candidates):
-    w = map_info._width
-    mask = candidates
-    road_cost = rc.get_road_cost()[0]
-    reserve = map_info.builder_ti_reserve()
-    while mask:
-        lsb = mask & -mask
-        n = lsb.bit_length() - 1
-        p = Position(n % w, n // w)
-        if rc.can_build_road(p) and rc.get_global_resources()[0] >= road_cost + reserve:
-            rc.build_road(p)
-            map_info.update_at(p)
-            return True
-        mask ^= lsb
-    return False
-
-
-def try_road_spam():
-    """Opportunistic road placement. Priority order:
-      1. (Always) tiles adjacent to a friendly conveyor or on a friendly
-         conveyor target — pave conveyor lanes regardless of enemies.
-      2. (Enemy within 4 pathing dist) tile adjacent to an enemy bot.
-      3. (Enemy within 4) tile adjacent to enemy non-marker non-road building.
-      4. (Enemy within 4) tile under me.
-      5. (Enemy within 4) any adjacent buildable tile.
-    Tiles covered by my gunners' current shooting rays are excluded.
-    Action-cooldown gated."""
-    if rc.get_action_cooldown() != 0:
-        return False
-
-    w = map_info._width
-    my_pos = map_info._my_pos
-    my_x = my_pos.x
-    my_y = my_pos.y
-    my_bit = 1 << (my_x + my_y * w)
-    my_neighbors = map_info.expand_chebyshev(my_bit) & ~my_bit
-
-    # Don't build roads where my own gunners are shooting through.
-    avoid = map_info._bm_my_gunner_claims | map_info._bm_enemy_hard_threat
-    allowed_neighbors = my_neighbors & ~avoid
-    draw_mask(avoid & my_neighbors, 255, 0, 0)
-
-    # Priority 1: pave around our conveyors (always, regardless of enemies)
-    my_team_idx = map_info._my_team_idx
-    friendly_convs = map_info._bm_conveyors & map_info._bm_team[my_team_idx]
-    if friendly_convs:
-        conv_zone = (
-            map_info.expand_chebyshev(friendly_convs)
-            | map_info._conveyor_target_tiles(friendly_convs)
-        )
-        if _try_mask(conv_zone & allowed_neighbors):
-            return True
-
-    enemy_bots = map_info._bm_enemy_bots
-    if not enemy_bots:
-        return False
-    closest_enemy, dist = nav.closest(enemy_bots)
-    if closest_enemy is None or dist > 4:
-        return False
-
-    # Restrict near-enemy spam to tiles adjacent to any conveyor or harvester.
-    spam_sources = (
-        map_info._bm_conveyors
-        | map_info._bm_et[map_info._IDX_HARVESTER]
-    )
-    if not spam_sources:
-        return False
-    spam_zone = map_info.expand_chebyshev(spam_sources)
-    spam_neighbors = allowed_neighbors & spam_zone
-
-    if _try_mask(map_info.expand_chebyshev(enemy_bots) & spam_neighbors):
-        return True
-
-    enemy_hard = (
-        map_info._bm_team[1 - my_team_idx]
-        & ~map_info._bm_et[map_info._IDX_MARKER]
-        & ~map_info._bm_et[map_info._IDX_ROAD]
-    )
-    if enemy_hard:
-        if _try_mask(map_info.expand_chebyshev(enemy_hard) & spam_neighbors):
-            return True
-
-    if (spam_zone & my_bit) and not (avoid & my_bit) and rc.can_build_road(my_pos) and rc.get_global_resources()[0] >= rc.get_road_cost()[0] + map_info.builder_ti_reserve():
-        rc.build_road(my_pos)
-        map_info.update_at(my_pos)
-        return True
-
-    if _try_mask(spam_neighbors):
-        return True
-    return False

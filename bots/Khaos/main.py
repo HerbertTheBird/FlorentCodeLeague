@@ -1,4 +1,22 @@
-from cambc import Controller, EntityType, wrap as _wrap_controller
+def has_op() -> bool:
+    """True iff this unit still has its single move-or-action for this turn.
+
+    Both cooldowns being zero is the only gate-aware check: a move sets only the
+    move cooldown and an action sets only the action cooldown, but doing either
+    blocks the other for the turn. (can_act() alone misses the move case.)
+
+    Reads the controller from `map_info._rc`, NOT a main-level global: the engine
+    can load this file under a different module name than the `main` that other
+    modules import has_op from, so a main-level global would not be shared. But
+    `import map_info` is absolute + cached, so map_info is the same module
+    everywhere; its `_rc` is set in map_info.init() and stable across turns.
+    (map_info is bound by the `import map_info` below before any runtime call;
+    has_op is still defined here at the top so other modules can import it
+    without a circular-import failure.)"""
+    return map_info._rc.get_action_cooldown() == 0 and map_info._rc.get_move_cooldown() == 0
+
+
+from fcode import Controller, EntityType
 
 import random
 import sys
@@ -11,7 +29,6 @@ import units.turret_sentinel as sentinel
 import units.turret_launcher as launcher
 import map_info
 import comms
-import chokepoint
 
 class Player:
     def __init__(self):
@@ -22,7 +39,6 @@ class Player:
 
 
     def run(self, c: Controller) -> None:
-        c = _wrap_controller(c)  # adapt Titan controller to the cambc surface Khaos expects
         round_num = c.get_current_round()
 
         try:
@@ -51,9 +67,7 @@ class Player:
 
             self.me.run()
 
-            chokepoint.post_turn(c)
 
         except Exception as e:
             print("Error:", e)
-            import traceback
-            traceback.print_exc(file=sys.stderr)
+            print(f"Error: {e}", file=sys.stderr)

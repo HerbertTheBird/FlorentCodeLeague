@@ -1,5 +1,6 @@
+from main import has_op
 import map_info
-from cambc import Controller, Direction, Position, EntityType
+from fcode import Controller, Direction, Position, EntityType
 import units.builder as builder
 from log import DRAW_DEBUG, log
 from _config import CONVEYOR_COST_DISCOUNT
@@ -18,17 +19,9 @@ from typing import TypeAlias
 Step: TypeAlias = tuple[int, int, int, int]
 # (dx, dy, cost, valid_from_mask)
 
-bridge_cost = 6
 barrier_cost = 15
 threat_cost = 20
 conveyor_end_cost = 4
-
-
-def _dir_family(dx: int, dy: int) -> int:
-    """0 for cardinal, +1 for NE/SW diagonal, -1 for NW/SE diagonal."""
-    if dx == 0 or dy == 0:
-        return 0
-    return 1 if dx * dy > 0 else -1
 
 
 # Offsets (dx, dy) such that lsb_pos = target_pos + (dx, dy) covers all 9
@@ -42,8 +35,6 @@ _FULL_COVER_OFFSETS = [
 ]
 
 
-
-destroyed_barriers = dict()
 
 _base_claim_cache_key = None
 _base_claim_cache_value = (0, 0)
@@ -71,38 +62,8 @@ def _init_col_masks(width: int, height: int) -> None:
     _nlc3 = ~left_col_3
     _nrc3 = ~right_col_3
     _col_masks_initialized = True
-def rebuild_broken_barriers(rc: Controller):
-    if not destroyed_barriers:
-        return
-    if  rc.get_global_resources()[0] < rc.get_barrier_cost()[0] + map_info.builder_ti_reserve():
-        return
-    if rc.get_action_cooldown() > 0:
-        return
 
-    my_pos = map_info._my_pos
-    my_team = map_info._my_team
-    current_round = rc.get_current_round()
-    
-    rebuilt_pos = None
-    
-    for p in destroyed_barriers:
-        if p == my_pos:
-            continue
-        if my_pos.distance_squared(p) > 2:
-            continue
-        if destroyed_barriers[p]+1 > current_round:
-            continue
-        id = rc.get_tile_building_id(p)
-        if id and rc.get_entity_type(id) == map_info._ET_ROAD and rc.get_team(id) == my_team and rc.can_destroy(p) and not rc.get_tile_builder_bot_id(p):
-            rc.destroy(p)
-            map_info.update_at(p)
-        if rc.can_build_barrier(p) and rc.get_global_resources()[0] >= rc.get_barrier_cost()[0] + map_info.builder_ti_reserve():
-            rc.build_barrier(p)
-            map_info.update_at(p)
-            rebuilt_pos = p
-            break
-    if rebuilt_pos is not None:
-        destroyed_barriers.pop(rebuilt_pos, None)
+
 def voronoi_claim(my_mask, others_mask, claims, passable=None):
     if not claims:
         return 0
@@ -127,8 +88,7 @@ def voronoi_claim(my_mask, others_mask, claims, passable=None):
 
     while remaining_claims and (my_front or other_front):
         if my_front:
-            h = my_front | ((my_front & nrc) << 1) | ((my_front & nlc) >> 1)
-            my_expand = ((h | (h << w) | (h >> w)) & board) & passable & ~all_claimed
+            my_expand = ((my_front | ((my_front & nrc) << 1) | ((my_front & nlc) >> 1) | (my_front << w) | (my_front >> w))) & passable & ~all_claimed
             my_claimed |= my_expand
             all_claimed |= my_expand
             remaining_claims &= ~my_expand
@@ -136,8 +96,7 @@ def voronoi_claim(my_mask, others_mask, claims, passable=None):
         if not remaining_claims:
             break
         if other_front:
-            h = other_front | ((other_front & nrc) << 1) | ((other_front & nlc) >> 1)
-            other_expand = ((h | (h << w) | (h >> w)) & board) & passable & ~all_claimed
+            other_expand = ((other_front | ((other_front & nrc) << 1) | ((other_front & nlc) >> 1) | (other_front << w) | (other_front >> w))) & passable & ~all_claimed
             all_claimed |= other_expand
             remaining_claims &= ~other_expand
             other_front = other_expand
@@ -176,8 +135,7 @@ def _claim_zone_on_passable(my_mask: int, others_mask: int, passable: int, self_
 
         if first_is_self:
             if my_front:
-                h = my_front | ((my_front & nrc) << 1) | ((my_front & nlc) >> 1)
-                my_expand = ((h | (h << w) | (h >> w)) & board) & passable & ~all_claimed
+                my_expand = ((my_front | ((my_front & nrc) << 1) | ((my_front & nlc) >> 1) | (my_front << w) | (my_front >> w))) & passable & ~all_claimed
                 my_claimed |= my_expand
                 all_claimed |= my_expand
                 remaining &= ~my_expand
@@ -185,15 +143,13 @@ def _claim_zone_on_passable(my_mask: int, others_mask: int, passable: int, self_
             if not remaining:
                 break
             if other_front:
-                h = other_front | ((other_front & nrc) << 1) | ((other_front & nlc) >> 1)
-                other_expand = ((h | (h << w) | (h >> w)) & board) & passable & ~all_claimed
+                other_expand = ((other_front | ((other_front & nrc) << 1) | ((other_front & nlc) >> 1) | (other_front << w) | (other_front >> w))) & passable & ~all_claimed
                 all_claimed |= other_expand
                 remaining &= ~other_expand
                 other_front = other_expand
         else:
             if other_front:
-                h = other_front | ((other_front & nrc) << 1) | ((other_front & nlc) >> 1)
-                other_expand = ((h | (h << w) | (h >> w)) & board) & passable & ~all_claimed
+                other_expand = ((other_front | ((other_front & nrc) << 1) | ((other_front & nlc) >> 1) | (other_front << w) | (other_front >> w))) & passable & ~all_claimed
                 all_claimed |= other_expand
                 remaining &= ~other_expand
                 other_front = other_expand
@@ -326,7 +282,7 @@ class Pathing:
             passable = map_info._bm_passable_FFF
         else:
             passable = (
-                ~map_info.get_avoid(False, False, False, enemy_pov=not side)
+                ~map_info.get_avoid(False, enemy_pov=not side)
                 & map_info._board_mask
             )
         if avoid:
@@ -348,8 +304,7 @@ class Pathing:
                 break
             visited |= frontier
             dist += 1
-            h = frontier | ((frontier & nrc) << 1) | ((frontier & nlc) >> 1)
-            expanded = h | (h << w) | (h >> w)
+            expanded = frontier | ((frontier & nrc) << 1) | ((frontier & nlc) >> 1) | (frontier << w) | (frontier >> w)
             frontier = expanded & passable & ~visited
         return None, -1
 
@@ -411,53 +366,11 @@ class Pathing:
             (-1, 0, 1),
             (1, 0, 1),
         ]
-
-        raw_dirs: list[tuple[int, int, int]] = [
-            (0, -1, 1),
-            (0, 1, 1),
-            (-1, 0, 1),
-            (1, 0, 1),
-            (-1, -1, 1),
-            (1, -1, 1),
-            (-1, 1, 1),
-            (1, 1, 1),
-        ]
-
         raw_conv: list[tuple[int, int, int]] = [
             (0, -1, 1),
             (0, 1, 1),
             (-1, 0, 1),
             (1, 0, 1),
-
-            (3, 0, bridge_cost),
-            (-3, 0, bridge_cost),
-            (0, 3, bridge_cost),
-            (0, -3, bridge_cost),
-
-            (2, 2, bridge_cost),
-            (2, -2, bridge_cost),
-            (-2, 2, bridge_cost),
-            (-2, -2, bridge_cost),
-
-            # (2, 1, bridge_cost),
-            # (2, -1, bridge_cost),
-            # (-2, 1, bridge_cost),
-            # (-2, -1, bridge_cost),
-
-            # (1, 2, bridge_cost),
-            # (1, -2, bridge_cost),
-            # (-1, 2, bridge_cost),
-            # (-1, -2, bridge_cost),
-
-            # (-2, 0, bridge_cost),
-            # (2, 0, bridge_cost),
-            # (0, 2, bridge_cost),
-            # (0, -2, bridge_cost),
-
-            # (-1, -1, bridge_cost),
-            # (-1, 1, bridge_cost),
-            # (1, -1, bridge_cost),
-            # (1, 1, bridge_cost),
         ]
 
         # --- mask cache (important: many dx/dy repeat) ---
@@ -500,10 +413,9 @@ class Pathing:
 
         # --- final tables ---
         self.CARD = make_steps(raw_card)
-        self.DIRS = make_steps(raw_dirs)
         self.CONV = make_steps(raw_conv)
 
-    def move(self, dir: Direction, build_road: bool = True):
+    def move(self, dir: Direction):
         rc = self.rc
         px, py = map_info._my_pos.x, map_info._my_pos.y
         dx, dy = map_info._DIRECTION_DELTAS[dir]
@@ -512,36 +424,20 @@ class Pathing:
             return False
         if rc.get_tile_builder_bot_id(new_pos) != None:
             return False
-        id = rc.get_tile_building_id(new_pos)
-        if id and rc.get_entity_type(id) == EntityType.BARRIER and rc.can_destroy(new_pos) and rc.get_action_cooldown() == 0 and rc.get_global_resources()[0] > rc.get_road_cost()[0] + map_info.builder_ti_reserve():
-            rc.destroy(new_pos)
-            map_info.update_at(new_pos)
-            destroyed_barriers[new_pos] = rc.get_current_round()
-        if build_road and rc.can_build_road(new_pos) and rc.get_global_resources()[0] >= rc.get_road_cost()[0] + map_info.builder_ti_reserve():
-            rc.build_road(new_pos)
-            map_info.update_at(new_pos)
-        if rc.can_move(dir):
+        if rc.can_move(dir) and has_op():
             rc.move(dir)
             map_info.update_move()
             self.last_last_dir = self.last_dir
             self.last_dir = map_info._DIRECTION_DELTAS[dir]
             return True
         return False
-    # Move reconstruction offsets: (dx, dy, step_cost) for all 8 dirs
+    # Move reconstruction offsets: (dx, dy, step_cost) for the 4 cardinals
     _MOVE_OFFSETS = [
         (0, -1, 1), (0, 1, 1), (-1, 0, 1), (1, 0, 1),
-        (-1, -1, 1), (1, -1, 1), (-1, 1, 1), (1, 1, 1),
     ]
-    # Route reconstruction offsets: 4 cardinals (cost 1) + 24 bridge offsets
-    # (all (dx,dy) with max(|dx|,|dy|) <= 2 and not (0,0)) at bridge_cost
+    # Route reconstruction offsets: 4 cardinals (cost 1) — no bridges
     _ROUTE_OFFSETS = (
         [(0, -1, 1), (0, 1, 1), (-1, 0, 1), (1, 0, 1)]
-        + [(dx, dy, bridge_cost)
-           for dy in (-2, -1, 0, 1, 2)
-           for dx in (-2, -1, 0, 1, 2)
-           if (dx, dy) != (0, 0) and (abs(dx) == 2 or abs(dy) == 2)]
-        + [(3, 0, bridge_cost), (-3, 0, bridge_cost),
-           (0, 3, bridge_cost), (0, -3, bridge_cost)]
     )
 
     def bfs_move(self, start_n: int, target_mask: int, avoid: int, avoid_turret: bool = True):
@@ -557,7 +453,6 @@ class Pathing:
         bm_friendly_bots = map_info._bm_friendly_bots
         bm_enemy_bots = map_info._bm_enemy_bots
         idx_barrier = map_info._IDX_BARRIER
-        idx_road = map_info._IDX_ROAD
         bm_conveyors = map_info._bm_conveyors
         bm_my_core_area = map_info._bm_my_core_area
         nlc = map_info._not_left_col
@@ -569,7 +464,9 @@ class Pathing:
 
         avoid &= ~start_mask
         builders_mask = (bm_friendly_bots | bm_enemy_bots) & ~start_mask
-        can_move_to = map_info.expand_chebyshev(start_mask) & ~avoid & ~builders_mask
+        # Our own tile counts as a reachable option so "stay put" can win a tie
+        # against a step (we prefer not moving when a move gets us no closer).
+        can_move_to = (map_info.expand_manhattan(start_mask) & ~avoid & ~builders_mask) | start_mask
 
         my_team_idx = map_info._my_team_idx
         barriers = bm_et[idx_barrier] & bm_team[my_team_idx]
@@ -582,11 +479,6 @@ class Pathing:
         # builder.draw_mask(avoid, 255, 0, 255)
 
         # builder.draw_mask(barriers, 0, 0, 255)
-
-        walkable = (bm_et[idx_road]
-                    | bm_conveyors
-                    | bm_my_core_area
-                    | start_mask)
 
         w = width
         not_avoid = board & ~avoid
@@ -627,6 +519,11 @@ class Pathing:
                 cx = start_n % width
                 cy = start_n // width
                 start_pos = Position(cx, cy)
+                # Prefer no move: the BFS reaches tiles in increasing cost order,
+                # so if our own tile is in the first hit layer, staying is at
+                # least as close to the target as any step — don't move.
+                if hit & start_mask:
+                    return start_pos, start_pos, i
                 from_mask = hit
                 if target_mask.bit_count() == 1:
                     tn = target_mask.bit_length() - 1
@@ -641,10 +538,6 @@ class Pathing:
                     all_covered = hit & cover_mask
                     if all_covered:
                         from_mask = all_covered
-                # TITAN: empty tiles are directly walkable (Cambridge required a
-                # road, so it preferred already-walkable tiles to save the build
-                # action). In Titan stepping onto empty costs no action, so there
-                # is no reason to prefer road/conveyor tiles — take the direct path.
                 border = self._board_border | bm_friendly_bots
                 last_working_mask = from_mask
                 c = 0
@@ -654,32 +547,36 @@ class Pathing:
                     from_mask &= ~border
                     border = map_info.expand_manhattan(border)
                 from_mask = last_working_mask
-                last_fam = _dir_family(*self.last_dir) if self.last_dir is not None else 0
-                last_last_fam = _dir_family(*self.last_last_dir) if self.last_last_dir is not None else 0
-                preferred_family = 0 if last_fam == 0 else -last_fam if last_fam == last_last_fam else last_fam
-                if preferred_family == 0:
-                    preferred_family = 2 #dont want to prefer straight over diag
-                # builder.draw_mask(from_mask, 255, 255, 0)
-                log("preferred family", preferred_family, self.last_dir, self.last_last_dir)
+                # Tiebreak among equal-cost first steps: pick the tile whose
+                # Chebyshev distance to the (nearest) target is smallest.
+                if target_mask.bit_count() == 1:
+                    tn = target_mask.bit_length() - 1
+                    targets = ((tn % w, tn // w),)
+                else:
+                    targets = []
+                    tm = target_mask
+                    while tm:
+                        tb = tm & -tm
+                        tm ^= tb
+                        tnn = tb.bit_length() - 1
+                        targets.append((tnn % w, tnn // w))
                 best_dir = None
-                best_fam_abs = -1
+                best_cheb = None
                 while from_mask:
                     check_bit = from_mask & -from_mask
                     from_mask ^= check_bit
                     n = check_bit.bit_length() - 1
-                    dx = n % width - cx
-                    dy = n // width - cy
-                    fam = _dir_family(dx, dy)
-                    fam_abs = -fam if fam < 0 else fam
-                    if best_dir is None or fam == preferred_family or fam_abs > best_fam_abs:
-                        best_dir = (dx, dy)
-                        best_fam_abs = fam_abs
+                    nx = n % width
+                    ny = n // width
+                    cheb = min(max(abs(nx - tx2), abs(ny - ty2)) for tx2, ty2 in targets)
+                    if best_cheb is None or cheb < best_cheb:
+                        best_cheb = cheb
+                        best_dir = (nx - cx, ny - cy)
 
-                return start_pos, Position(cx+best_dir[0], cy+best_dir[1]), i
-            # 3x3 Chebyshev expansion via 4 shifts
+                return start_pos, Position(cx + best_dir[0], cy + best_dir[1]), i
+            # 4-neighbour (cardinal) expansion — movement is cardinal-only
             f = cur_frontier
-            h = f | ((f & nrc) << 1) | ((f & nlc) >> 1)
-            expanded = h | (h << w) | (h >> w)
+            expanded = f | ((f & nrc) << 1) | ((f & nlc) >> 1) | (f << w) | (f >> w)
             new = expanded & ~visited & not_avoid
 
             frontier[(i + 1) % cycle_len]                                        |= new & nb_nt
@@ -697,7 +594,7 @@ class Pathing:
         width = self.width
         height = self.height
         if avoid is None:
-            avoid = map_info.get_avoid(False, True, False)
+            avoid = map_info.get_avoid(False)
         # builder.draw_mask(avoid, 255, 0, 0)
 
         # builder.draw_mask(target_mask, 0, 255, 255)
@@ -707,11 +604,11 @@ class Pathing:
             t_end = target_mask & end_cost_mask
             t_core = target_mask & ~t_end
         else:
-            convs = map_info._bm_conveyors & ~map_info._bm_my_core_area & (map_info._bm_ti_carrying | map_info._bm_raw_ax_carrying |  map_info._bm_refined_carrying)
+            convs = map_info._bm_conveyors & ~map_info._bm_my_core_area & map_info._bm_ti_carrying
             t_end = target_mask & convs
             t_core = target_mask & ~convs
 
-        max_c = bridge_cost
+        max_c = 1
         max_seed = conveyor_end_cost
         cycle_len = max(max_c, max_seed) + 1
         frontier = [0] * cycle_len
@@ -720,9 +617,6 @@ class Pathing:
 
         nlc = map_info._not_left_col
         nrc = map_info._not_right_col
-        nlc2 = _nlc2
-        nlc3 = _nlc3
-        nrc3 = _nrc3
         w = width
         board = map_info._board_mask
         not_avoid = board & ~avoid
@@ -731,13 +625,10 @@ class Pathing:
         visited = 0
         visited_layers: list[int] = []
         i = 0
-        foundries = map_info.expand_manhattan(map_info._bm_et[map_info._IDX_FOUNDRY])
         while True:
             # log("route",i,file=sys.stderr)
             slot = i % cycle_len
             cur_frontier = frontier[slot] & ~visited
-            if i > 1:
-                cur_frontier &= ~foundries
             frontier[slot] = 0
             visited_layers.append(cur_frontier)
             visited |= cur_frontier
@@ -789,31 +680,15 @@ class Pathing:
                 | (f >> w)
             ) & not_avoid
             frontier[(i + 1) % cycle_len] |= new_card
-
-            # Bridges — full 5x5 Chebyshev-2 zone via 6 OR-shifts (no mid-cell filtering)
-            a = f | ((f & nrc) << 1)
-            b = a | ((a & nrc) << 1)
-            row = b | ((b & nlc2) >> 2)
-            va = row | (row << w)
-            vb = va | (va << w)
-            zone = vb | (vb >> (2 * w))
-            new_bridge = (zone & ~f) & not_avoid
-            # 3-step cardinals (bridge jumps of distance 3)
-            new_bridge |= (
-                ((f & nrc3) << 3)
-                | ((f & nlc3) >> 3)
-                | (f << (3 * w))
-                | (f >> (3 * w))
-            ) & not_avoid
-            frontier[(i + bridge_cost) % cycle_len] |= new_bridge
             i += 1
     def move_adjacent(self, pos: Position, fallback: Position | None = None, **kwargs):
-        """Move to an adjacent tile of pos. Filters by in_bounds, passable, no builder bot, and in vision."""
+        """Move to a CARDINAL neighbour of pos. Titan build/destroy/heal reach is
+        cardinal-only (dist^2 == 1), so a diagonal neighbour is useless — the
+        follow-up action would just fail. Filters by in_bounds, passable, no
+        builder bot, and in vision."""
         rc = self.rc
         adj = set()
-        for d in ALL_DIRS:
-            if d == Direction.CENTRE:
-                continue
+        for d in CARD_DIR:
             p = map_info.pos_add(pos, d)
             if not map_info.in_bounds(p):
                 continue
@@ -840,7 +715,7 @@ class Pathing:
             target_set = target
         if target_set != self.target_p:
             self.forget_launcher.clear()
-        avoid = map_info.get_avoid(False, False, False)
+        avoid = map_info.get_avoid(False)
         # if avoid_empty:
         #     avoid |= map_info._bm_seen & ~map_info._bm_any_building & ~map_info._bm_env[map_info._IDX_ENV_WALL]
         my_pos = map_info._my_pos
@@ -881,54 +756,6 @@ class Pathing:
             self.rc.draw_indicator_line(s_pos, p_pos, 0, 255, 255)
         return self.move(map_info.direction_to(s_pos, p_pos))
 
-    def move_to_adjacent(self, target: Position, avoid_turret: bool = True):
-        """Single-step move into the cheb-1 ring of target."""
-        rc = self.rc
-        my_pos = map_info._my_pos
-
-        adj_set = set()
-        for d in ALL_DIRS:
-            if d == Direction.CENTRE:
-                continue
-            p = map_info.pos_add(target, d)
-            if not map_info.in_bounds(p):
-                continue
-            if p == my_pos:
-                return False
-            if not map_info.is_passable(p):
-                continue
-            if rc.is_in_vision(p) and rc.get_tile_builder_bot_id(p):
-                continue
-            adj_set.add(p)
-        if not adj_set:
-            return False
-
-        threat = map_info._bm_enemy_launch_adj
-        if avoid_turret:
-            threat |= map_info._bm_enemy_turret_threat
-
-        w = self.width
-        safe_dir = None
-        risky_dir = None
-        for d in ALL_DIRS:
-            if d == Direction.CENTRE or not rc.can_move(d):
-                continue
-            step = map_info.pos_add(my_pos, d)
-            if step not in adj_set:
-                continue
-            bit = 1 << (step.x + step.y * w)
-            if bit & threat:
-                if risky_dir is None:
-                    risky_dir = d
-            else:
-                safe_dir = d
-                break
-
-        chosen = safe_dir if safe_dir is not None else risky_dir
-        if chosen is None:
-            return False
-        return self.move(chosen, build_road=False)
-
     def _calculate_conveyor_path_to(
         self,
         start: Position,
@@ -961,22 +788,16 @@ class Pathing:
             self.rc.draw_indicator_dot(s_pos, 255, 0, 255)
         return (s_pos, p_pos, dist)
 
-    def calculate_conveyor_path(self, start: Position, raw_axionite: bool, update: bool = False):
-        log("conveyors from ", start, raw_axionite)
-        target, avoid = self._get_conveyor_targets_and_avoid(raw_axionite)
-        end_cost_mask = self.raw_ax_foundry_sites() if raw_axionite else 0
+    def calculate_conveyor_path(self, start: Position, update: bool = False):
+        log("conveyors from ", start)
+        target, avoid = self._get_conveyor_targets_and_avoid()
         return self._calculate_conveyor_path_to(
             start,
             target,
             avoid,
             update,
-            end_cost_mask=end_cost_mask,
+            end_cost_mask=0,
         )
-
-    def calculate_attack_conveyor_path(self, start: Position, update: bool = False):
-        log("attack conveyors from ", start)
-        target, avoid = self._get_attack_conveyor_targets_and_avoid()
-        return self._calculate_conveyor_path_to(start, target, avoid, update)
 
     def conveyor_cost(self, dist, scaling=None):
         if scaling is None:
@@ -986,77 +807,15 @@ class Pathing:
         # Arithmetic-series equivalent of:
         #   sum(3 * (scaling + 0.01 * k) for k in range(dist))
         return (3 * dist * scaling + 0.015 * dist * (dist - 1)) * CONVEYOR_COST_DISCOUNT
-    def raw_ax_foundry_sites_old(self):
-        w = map_info._width
-        my_idx = map_info._my_team_idx
-        enemy_idx = 1 - my_idx
-        harv_on_ore = map_info._bm_et[map_info._IDX_HARVESTER] & map_info._bm_team[my_idx] & map_info._bm_env[map_info._IDX_ENV_ORE_TI]
-        my_foundries = map_info._bm_et[map_info._IDX_FOUNDRY] & map_info._bm_team[my_idx]
-        foundry_adj = ((my_foundries & map_info._not_right_col) << 1) | ((my_foundries & map_info._not_left_col) >> 1) | (my_foundries << w) | (my_foundries >> w)
-        harv_on_ore &= ~foundry_adj
-        adj = ((harv_on_ore & map_info._not_right_col) << 1) | ((harv_on_ore & map_info._not_left_col) >> 1) | (harv_on_ore << w) | (harv_on_ore >> w)
-        enemy_block = (
-            map_info._bm_team[enemy_idx]
-            & ~map_info._bm_et[map_info._IDX_ROAD]
-            & ~map_info._bm_et[map_info._IDX_MARKER]
-        )
-        friendly_block = (
-            (map_info._bm_et[map_info._IDX_HARVESTER]
-             | map_info._bm_et[map_info._IDX_FOUNDRY]
-             | map_info._bm_et[map_info._IDX_CORE]
-             | map_info._bm_et[map_info._IDX_CONVEYOR]
-             | map_info._bm_et[map_info._IDX_ARMOURED_CONVEYOR]
-             | map_info._bm_et[map_info._IDX_BRIDGE])
-            & map_info._bm_team[my_idx] & ~map_info._bm_guard_conveyor
-        )
-        blocked = enemy_block | friendly_block | map_info._bm_env[map_info._IDX_ENV_WALL]
-        open_mask = ~blocked
-        n1 = (open_mask & map_info._not_right_col) << 1
-        n2 = (open_mask & map_info._not_left_col) >> 1
-        n3 = open_mask << w
-        n4 = open_mask >> w
-        at_least_two = ((n1 & n2) | (n1 & n3) | (n1 & n4)
-                        | (n2 & n3) | (n2 & n4) | (n3 & n4))
-        core_adj = map_info.expand_manhattan(map_info._bm_my_core_area)
-        return (core_adj & map_info._bm_conveyors & map_info._bm_team[my_idx] & map_info._bm_ti_carrying & ~map_info.expand_chebyshev(map_info._bm_et[map_info._IDX_FOUNDRY]))
-        return ((adj & ~blocked & at_least_two) | (core_adj & map_info._bm_conveyors & map_info._bm_team[my_idx] & map_info._bm_conv_ti))&builder._harvest_zone
-
-    def raw_ax_foundry_sites(self):
-        """Active raw-ax foundry-site logic.
-
-        This preserves the behavior of the currently-reached return path above,
-        while keeping the older broader implementation available separately.
-        """
-        my_idx = map_info._my_team_idx
-        core_adj = map_info.expand_manhattan(map_info._bm_my_core_area)
-        my_foundries = map_info._bm_et[map_info._IDX_FOUNDRY]
-        return (
-            core_adj
-            & map_info._bm_conveyors
-            & map_info._bm_team[my_idx]
-            & map_info._bm_ti_carrying
-            & ~map_info.expand_chebyshev(my_foundries)
-        )
 
     def _get_conveyor_targets_and_avoid(
-        self, raw_axionite: bool
+        self
     ):
-        avoid = map_info.get_avoid(True, False, True)
-        if raw_axionite:
-            ti_harvesters = map_info.expand_manhattan(map_info._bm_env[map_info._IDX_ENV_ORE_TI])
-            target = self.raw_ax_foundry_sites()
-            avoid |= map_info.expand_manhattan(map_info._bm_my_core_area)
-            avoid |= ti_harvesters
-            target |= map_info._bm_route_targets & map_info._bm_conv_raw_ax
-            return target, avoid
-        else:
-            ax_harvesters = map_info.expand_manhattan(map_info._bm_env[map_info._IDX_ENV_ORE_AX])
-            target = (map_info._bm_route_targets & ~map_info._bm_conv_raw_ax) | map_info._bm_my_core_area
-            target &= ~ax_harvesters
-            avoid |= ax_harvesters
-            if not target:
-                return 0, 0
-            return target, avoid
+        avoid = map_info.get_avoid(True)
+        target = map_info._bm_route_targets | map_info._bm_my_core_area
+        if not target:
+            return 0, 0
+        return target, avoid
 
     def _enemy_core_area_mask(self) -> int:
         if map_info._bm_their_core_area:
@@ -1073,30 +832,3 @@ class Pathing:
                 if 0 <= x < w:
                     mask |= 1 << (x + y * w)
         return mask
-
-    def _get_attack_conveyor_targets_and_avoid(self):
-        avoid = map_info.get_avoid(True, False, True)
-        core_area = self._enemy_core_area_mask()
-        if not core_area:
-            return 0, 0
-
-        bm_et = map_info._bm_et
-        my_team = map_info._bm_team[map_info._my_team_idx]
-        terminal_clearable = (
-            (~map_info._bm_any_building & map_info._board_mask)
-            | bm_et[map_info._IDX_MARKER]
-            | bm_et[map_info._IDX_ROAD]
-            | bm_et[map_info._IDX_CONVEYOR]
-            | bm_et[map_info._IDX_SPLITTER]
-            | bm_et[map_info._IDX_BRIDGE]
-            | (bm_et[map_info._IDX_BARRIER] & my_team)
-        )
-        ore = map_info._bm_env[map_info._IDX_ENV_ORE_TI] | map_info._bm_env[map_info._IDX_ENV_ORE_AX]
-        blocked_ground = map_info._bm_env[map_info._IDX_ENV_WALL] | ore
-
-        target = map_info.expand_manhattan(core_area) & ~core_area
-        target &= terminal_clearable & ~blocked_ground & map_info._board_mask
-        if not target:
-            target = map_info.expand_manhattan(core_area, 2) & ~core_area
-            target &= terminal_clearable & ~blocked_ground & map_info._board_mask
-        return target, avoid

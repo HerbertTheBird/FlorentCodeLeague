@@ -2,7 +2,7 @@ import map_info
 import pathing
 from pathing import Pathing
 import units.builder
-from cambc import *
+from fcode import *
 from log import log
 
 rc: Controller = None
@@ -14,15 +14,11 @@ def init(c: Controller):
     nav = units.builder.nav
 
 def _disruptable_ore():
-    all_ore = (map_info._bm_env[map_info._IDX_ENV_ORE_TI]
-               | map_info._bm_env[map_info._IDX_ENV_ORE_AX])
-    clearable = (map_info._bm_et[map_info._IDX_ROAD]
-                 | map_info._bm_et[map_info._IDX_MARKER])
+    all_ore = map_info._bm_env[map_info._IDX_ENV_ORE_TI]
     return (all_ore
-            & (~map_info._bm_any_building | clearable)
+            & (~map_info._bm_any_building)
             & ~units.builder._harvest_zone
-            & ~map_info._bm_enemy_turret_threat
-            & ~map_info._bm_enemy_launch_adj)
+            & ~map_info._bm_enemy_turret_threat)
 
 def _my_claims():
     w = map_info._width
@@ -36,9 +32,6 @@ MAX_SCORE = 2
 _cached_claims = 0
 def score():
     global _cached_claims
-    if rc.get_global_resources()[0] < rc.get_harvester_cost()[0]*5:
-        _cached_claims = 0
-        return 0
     _cached_claims = _my_claims()
     return 2 if _cached_claims else 0
 
@@ -55,26 +48,7 @@ def run():
     width = map_info._width
 
     best_n = best.x + best.y * width
-    best_id = map_info._building_id[best_n]
-    best_bit = 1 << best_n
-    my_team_idx = map_info._my_team_idx
-
-    if best_id and (map_info._bm_team[my_team_idx] & best_bit):
-        # Friendly road/marker — move adjacent and destroy
-        nav.move_adjacent(best)
-        if rc.can_destroy(best) and rc.get_action_cooldown() == 0:
-            rc.destroy(best)
-            map_info.update_at(best)
-    elif best_id and (map_info._bm_et[map_info._IDX_ROAD]&best_bit):
-        # Enemy road/marker — move onto it and fire
-        nav.move_to({best})
-        if rc.can_fire(best):
-            rc.fire(best)
-            map_info.update_at(best)
-    else:
-        # Empty tile — move adjacent and build barrier
-        nav.move_adjacent(best)
-
-    if rc.can_build_barrier(best) and rc.get_global_resources()[0] >= rc.get_barrier_cost()[0] + map_info.builder_ti_reserve():
+    nav.move_adjacent(best)
+    if rc.can_build_barrier(best) and rc.get_global_resources() >= rc.get_barrier_cost() + map_info.ti_reserve():
         rc.build_barrier(best)
         map_info.update_at(best)

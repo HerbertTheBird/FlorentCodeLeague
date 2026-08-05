@@ -1,1 +1,0 @@
-from voronoi_core.contrib.bounding_circle import BoundingCircle

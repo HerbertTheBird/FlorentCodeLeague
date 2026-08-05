@@ -1,4 +1,5 @@
-from cambc import Controller, Position, Team
+from main import has_op
+from fcode import Controller, Position, Team
 
 import map_info
 from log import log
@@ -76,7 +77,7 @@ def _try_throw_enemy_away() -> bool:
     # treated as impassable. Smaller region = the bot is more contained
     # post-launch, which is what we want.
     forbidden = (
-        map_info.get_avoid(False, False, False, enemy_pov=True)
+        map_info.get_avoid(False, enemy_pov=True)
         | (~map_info._bm_seen & map_info._board_mask)
     )
     passable = ~forbidden & map_info._board_mask

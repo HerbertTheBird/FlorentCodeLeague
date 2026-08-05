@@ -1,7 +1,8 @@
+from main import has_op
 import random
 from itertools import combinations
 
-from cambc import Controller, Direction, Environment, Position
+from fcode import Controller, Direction, Environment, Position
 
 import map_info
 from log import DRAW_DEBUG

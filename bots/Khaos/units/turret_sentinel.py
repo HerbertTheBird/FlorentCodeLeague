@@ -1,4 +1,5 @@
-from cambc import Controller, Position, EntityType, Direction, GameConstants
+from main import has_op
+from fcode import Controller, Position, EntityType, Direction, GameConstants
 import map_info
 import pathing
 from pathing import Pathing
@@ -7,8 +8,6 @@ import units.turret_priority as turret_priority
 
 rc: Controller = None
 nav: Pathing = None
-_no_ammo_turns = 0
-_invalid_upstream_turns = 0
 
 CARDINAL_OFFSETS = [(0, 1), (0, -1), (-1, 0), (1, 0)]
 ONE_SHOT_HP = GameConstants.SENTINEL_DAMAGE  # 18
@@ -39,13 +38,11 @@ _WEIGHTS = {
 
 
 def init(c: Controller):
-    global rc, nav, _no_ammo_turns, _invalid_upstream_turns
+    global rc, nav
     global _prev_visible_hp
     global _lock_target_n, _lock_target_id, _lock_turns_left, _no_lock_until
     rc = c
     nav = Pathing(c)
-    _no_ammo_turns = 0
-    _invalid_upstream_turns = 0
     _prev_visible_hp = {}
     _lock_target_n = -1
     _lock_target_id = -1
@@ -94,66 +91,6 @@ def _am_highest_sentinel() -> bool:
     return True
 
 
-def _should_stay():
-    my_pos = rc.get_position()
-    my_team = map_info._my_team
-    for uid in rc.get_nearby_units(8):
-        if rc.get_entity_type(uid) != EntityType.BUILDER_BOT:
-            continue
-        if rc.get_team(uid) == my_team:
-            continue
-        p = rc.get_position(uid)
-        if max(abs(p.x - my_pos.x), abs(p.y - my_pos.y)) <= 2:
-            return True
-    # for dx, dy in CARDINAL_OFFSETS:
-    #     p = Position(my_pos.x + dx, my_pos.y + dy)
-    #     if map_info.in_bounds(p):
-    #         bid = rc.get_tile_building_id(p)
-    #         if bid and rc.get_entity_type(bid) == EntityType.HARVESTER:
-    #             return True
-    # Closest builder bot by pathing distance: if a friendly is strictly closer
-    # than any enemy, we're in their way — leave. Otherwise stay.
-    _, enemy_d = nav.closest_within(map_info._bm_enemy_bots&map_info._bm_visible, max_dist=8)
-    _, friendly_d = nav.closest_within(map_info._bm_friendly_bots&map_info._bm_visible, max_dist=2)
-    if enemy_d == -1 and friendly_d == -1:
-        return True
-    if enemy_d == -1:
-        return False
-    if friendly_d == -1:
-        return True
-    return enemy_d <= friendly_d+1
-
-
-def _ally_feeder_mask(max_steps: int = 6) -> int:
-    """Bitmask of friendly conveyors feeding any of my turrets (gunner/sentinel/breach).
-    Walks upstream via map_info._conv_reverse from each turret tile."""
-    my_team = map_info._bm_team[map_info._my_team_idx]
-    my_turrets = (
-        map_info._bm_et[map_info._IDX_SENTINEL]
-        | map_info._bm_et[map_info._IDX_GUNNER]
-        | map_info._bm_et[map_info._IDX_BREACH]
-    ) & my_team
-    if not my_turrets:
-        return 0
-    reverse = map_info._conv_reverse
-    visited = 0
-    frontier = my_turrets
-    for _ in range(max_steps):
-        next_frontier = 0
-        m = frontier
-        while m:
-            lsb = m & -m
-            n = lsb.bit_length() - 1
-            next_frontier |= reverse[n]
-            m ^= lsb
-        next_frontier &= ~visited
-        if not next_frontier:
-            break
-        visited |= next_frontier
-        frontier = next_frontier
-    return visited
-
-
 def _other_sentinel_attack_mask() -> int:
     """Union of geometric attack patterns of every OTHER friendly sentinel."""
     w = map_info._width
@@ -191,9 +128,7 @@ def _kill_assist_mask(candidates) -> int:
     damage (the user's "−4 HP grace"). These tiles bypass the bot-adjacency
     filter in `select_best`.
 
-    Damage values are conservative bases (no axionite buffs):
-      sentinel = 18, gunner = 10, breach = 40 (direct hit only — splash
-      isn't counted because it depends on adjacency to the actual hit tile).
+    Damage values are conservative bases: sentinel = 18, gunner = 7.
     `rc.can_fire_from` ignores ammo / cooldown but enforces geometry and
     (for gunners) first-obstruction LOS — the same proxy used elsewhere in
     the codebase."""
@@ -201,13 +136,12 @@ def _kill_assist_mask(candidates) -> int:
         return 0
 
     DMG = {
-        EntityType.SENTINEL: GameConstants.SENTINEL_DAMAGE,  # 18
-        EntityType.GUNNER:   GameConstants.GUNNER_DAMAGE,    # 10
+        EntityType.SENTINEL: GameConstants.SENTINEL_DAMAGE,
+        EntityType.GUNNER:   GameConstants.GUNNER_DAMAGE,
     }
     et_idx_to_et = {
         map_info._IDX_SENTINEL: EntityType.SENTINEL,
         map_info._IDX_GUNNER:   EntityType.GUNNER,
-        map_info._IDX_BREACH:   map_info._ET_BREACH,
     }
 
     my_team_bm = map_info._bm_team[map_info._my_team_idx]
@@ -217,8 +151,7 @@ def _kill_assist_mask(candidates) -> int:
 
     ally_turrets = (
         (map_info._bm_et[map_info._IDX_SENTINEL]
-         | map_info._bm_et[map_info._IDX_GUNNER]
-         | map_info._bm_et[map_info._IDX_BREACH])
+         | map_info._bm_et[map_info._IDX_GUNNER])
         & my_team_bm
         & ~(1 << my_n)
     )
@@ -274,10 +207,7 @@ def _resolve_target_on_tile(tile: Position):
         return None
     if rc.get_team(bid) == my_team:
         return None
-    etype = rc.get_entity_type(bid)
-    if etype == map_info._ET_MARKER:
-        return None
-    return etype, rc.get_hp(bid)
+    return rc.get_entity_type(bid), rc.get_hp(bid)
 
 
 def _fire_and_track(cand):
@@ -297,7 +227,6 @@ def _fire_and_track(cand):
 
 
 def run():
-    global _no_ammo_turns, _invalid_upstream_turns
     global _prev_visible_hp
     global _lock_target_n, _lock_target_id, _lock_turns_left, _no_lock_until
     map_info.update()
@@ -314,33 +243,14 @@ def run():
     prev_hp = _prev_visible_hp
     _prev_visible_hp = _snapshot_visible_enemy_hp()
 
-    if not map_info.turret_could_possibly_be_fed(rc.get_position()):
-        _invalid_upstream_turns += 1
-        if _invalid_upstream_turns >= 4 and not _should_stay() and rc.get_ammo_amount() == 0:
-            rc.self_destruct()
-            return
-    else:
-        _invalid_upstream_turns = 0
-
-    if rc.get_ammo_amount() < 10:
-        _no_ammo_turns += 1
-        if _no_ammo_turns >= 16 and not _should_stay():
-            rc.self_destruct()
-            return
-    else:
-        _no_ammo_turns = 0
-
     # ----- Always-run damage detection + lock state evolution ----------------
     # Runs every turn so the lock countdown ticks and we record [SENTINEL_DAMAGED]
     # even when we're on cooldown or low on ammo. No firing happens here — only
     # state updates and prints.
     w = map_info._width
-    feeder_mask = _ally_feeder_mask()
     in_range = []
     for tile in rc.get_attackable_tiles():
         n = tile.x + tile.y * w
-        if feeder_mask & (1 << n):
-            continue
         resolved = _resolve_target_on_tile(tile)
         if resolved is None:
             continue
@@ -363,7 +273,7 @@ def run():
             _lock_target_n = -1
             _lock_target_id = -1
             _lock_turns_left = 0
-        elif rc.get_ammo_amount() >= 5:
+        elif rc.get_global_ammo() >= GameConstants.SENTINEL_AMMO_COST:
             _lock_turns_left -= 1
             if _lock_turns_left <= 0:
                 print(
@@ -419,19 +329,17 @@ def run():
                     f"et={target[4].value} hp={target[3]} turns={LOCK_TURNS}"
                 )
 
-    # ----- Original cooldown / ammo gates (preserved) -----------------------
+    # ----- Cooldown / ammo gates. The ammo gate returns early (not self-
+    # destruct) so a temporarily-empty shared pool doesn't trigger the
+    # no-targets self-destruct below. -----------------------------------------
     if rc.get_action_cooldown() > 0:
         return
-    if rc.get_ammo_amount() < 5:
+    if rc.get_global_ammo() < GameConstants.SENTINEL_AMMO_COST:
         return
 
     # Build raw (fire-eligible). Recompute via can_fire over in_range.
     raw = [c for c in in_range if rc.can_fire(c[0])]
 
-    if not raw:
-        if not _should_stay():
-            rc.self_destruct()
-        return
 
     raw_by_n = {c[1]: c for c in raw}
 
@@ -476,10 +384,7 @@ def run():
         )
         return
 
-    # 3. No lock — normal pick.
+    # 3. No lock — normal pick (nothing worth firing this turn if None).
     if chosen is None:
-        if not _should_stay():
-            rc.self_destruct()
         return
-
     _fire_and_track(chosen)

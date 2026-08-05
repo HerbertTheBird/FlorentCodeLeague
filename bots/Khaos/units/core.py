@@ -1,4 +1,5 @@
-from cambc import Controller, Direction, Position, EntityType
+from main import has_op
+from fcode import Controller, Direction, Position, EntityType
 import map_info
 from log import log
 from units.spawn_plan import choose_spawn_plan, draw_spawn_plan, INITIAL_SPAWN_COUNT, INITIAL_EXPLORE_MAX_STEPS
@@ -11,27 +12,50 @@ DEFENSE_FRIENDLY_RADIUS_SQ = 36
 
 _spawn_plan: list[Direction] | None = None
 _num_spawned = 0
-_core_area: tuple[Position, ...] = ()
+_spawn_tiles: tuple[Position, ...] = ()   # tiles immediately surrounding the 2x2 core
 
 
-def _core_area_positions(pos: Position) -> tuple[Position, ...]:
-    # Titan core is 2x2 with top-left = pos (get_position()).  Builders spawn on
-    # the ring of tiles immediately surrounding that footprint, so return the
-    # 4x4 block minus the inner 2x2 core tiles.  (Cambridge's core was 3x3, hence
-    # the old centred 3x3 box.)  can_spawn() filters these further.
-    footprint = {(pos.x + dx, pos.y + dy) for dx in (0, 1) for dy in (0, 1)}
-    return tuple(
-        Position(x, y)
-        for x in range(pos.x - 1, pos.x + 3)
-        for y in range(pos.y - 1, pos.y + 3)
-        if (x, y) not in footprint
-    )
+def _compute_spawn_tiles() -> tuple[Position, ...]:
+    """Tiles immediately surrounding the core's 2x2 footprint (never on the core
+    itself). These are the only legal builder-spawn positions."""
+    core = map_info._my_core
+    if core is None:
+        return ()
+    w = map_info._width
+    h = map_info._height
+    core_tiles = {(core.x + dx, core.y + dy) for dx in (0, 1) for dy in (0, 1)}
+    ring: set[tuple[int, int]] = set()
+    for tx, ty in core_tiles:
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                nx, ny = tx + dx, ty + dy
+                if (nx, ny) in core_tiles:
+                    continue
+                if 0 <= nx < w and 0 <= ny < h:
+                    ring.add((nx, ny))
+    return tuple(Position(x, y) for x, y in ring)
 
 
 def init(c: Controller):
-    global rc, _core_area
+    global rc
     rc = c
-    _core_area = _core_area_positions(rc.get_position())
+
+
+def _spawn_best_toward(target: Position) -> bool:
+    """Spawn a builder on the surrounding tile closest to `target`. Returns True
+    if a builder was spawned."""
+    best = None
+    best_d = None
+    for p in _spawn_tiles:
+        if rc.can_spawn(p):
+            d = p.distance_squared(target)
+            if best_d is None or d < best_d:
+                best_d = d
+                best = p
+    if best is None:
+        return False
+    rc.spawn_builder(best)
+    return True
 
 
 def _spawn_toward_plan(core_pos: Position) -> bool:
@@ -40,48 +64,29 @@ def _spawn_toward_plan(core_pos: Position) -> bool:
         return False
 
     planned_dir = _spawn_plan[_num_spawned]
-    for d in (planned_dir, planned_dir.rotate_left(), planned_dir.rotate_right()):
-        p = map_info.pos_add(core_pos, d)
-        if rc.can_spawn(p):
-            rc.spawn_builder(p)
-            _num_spawned += 1
-            return True
+    dx, dy = map_info._DIRECTION_DELTAS[planned_dir]
+    # Aim well past the footprint so the closest surrounding tile is the one best
+    # aligned with the planned direction.
+    target = Position(core_pos.x + dx * 8, core_pos.y + dy * 8)
+    if _spawn_best_toward(target):
+        _num_spawned += 1
+        return True
     return False
 
 
-def _spawn_toward_center():
-    """Spawn on the core tile closest to map center."""
-    center = Position(map_info._width//2, map_info._height//2)
-    best = None
-    best_dist = float('inf')
-    for p in _core_area:
-        if rc.can_spawn(p):
-            d = p.distance_squared(center)
-            if d < best_dist:
-                best_dist = d
-                best = p
-    if best is not None:
-        rc.spawn_builder(best)
+def _spawn_toward_center() -> bool:
+    """Spawn on the surrounding tile closest to map center."""
+    center = Position(map_info._width // 2, map_info._height // 2)
+    return _spawn_best_toward(center)
 
 
 def _spawn_toward_enemy_if_undefended(has_close_ally: bool, closest_enemy: Position | None) -> bool:
     """If an enemy builder bot is in vision and no friendly builder bot sits
-    within dist² DEFENSE_FRIENDLY_RADIUS_SQ of the core, spawn a defender on
-    the core tile closest to the nearest enemy bot. Returns True if spawned."""
+    within dist² DEFENSE_FRIENDLY_RADIUS_SQ of the core, spawn a defender on the
+    surrounding tile closest to the nearest enemy bot. Returns True if spawned."""
     if has_close_ally or closest_enemy is None:
         return False
-    best = None
-    best_d = None
-    for p in _core_area:
-        if rc.can_spawn(p):
-            d = p.distance_squared(closest_enemy)
-            if best_d is None or d < best_d:
-                best_d = d
-                best = p
-    if best is None:
-        return False
-    rc.spawn_builder(best)
-    return True
+    return _spawn_best_toward(closest_enemy)
 
 
 def _scan_nearby_builders(core_pos: Position, my_team):
@@ -108,13 +113,17 @@ def _scan_nearby_builders(core_pos: Position, my_team):
 
 
 def run():
-    global _spawn_plan
+    global _spawn_plan, _spawn_tiles
     # if rc.get_current_round() == 200:
-        
+
     #     rc.resign()
     # Sync round info
     map_info.update()
-    titanium, axionite = rc.get_global_resources()
+    # The core's footprint never moves; compute the surrounding spawn ring once
+    # _my_core is known (after the first observation).
+    if not _spawn_tiles:
+        _spawn_tiles = _compute_spawn_tiles()
+    titanium = rc.get_global_resources()
     scaling = rc.get_scale_percent()
     core_pos = map_info._my_pos
     my_team = map_info._my_team
@@ -136,10 +145,6 @@ def run():
             # First spawn according to initial plan, then spawn toward center
             if not _spawn_toward_plan(core_pos):
                 _spawn_toward_center()
-                
-    # Convert axionite if we are short on titanium
-    harvester_cost = rc.get_harvester_cost()[0]
-    if rc.get_current_round() < 1500 and titanium < 4 * harvester_cost:
-        max_can_convert = axionite - 1
-        desired_convert = (3 * harvester_cost - titanium) // 4
-        rc.convert(max(min(max_can_convert, desired_convert), 0))
+    ammo_amount = min(50, rc.get_current_round() * 2) - rc.get_global_ammo()
+    if ammo_amount > 0 and rc.can_convert_ammo(ammo_amount):
+        rc.convert_ammo(ammo_amount)
