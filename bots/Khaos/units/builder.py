@@ -1,5 +1,5 @@
 from main import has_op
-from fcode import Controller, Position
+from fcode import Controller, Position, Direction
 
 import random
 
@@ -189,7 +189,7 @@ def run():
         if current_round == 1:
             _stay_near_core = True
     map_info.update(recompute=False)
-    comms.update()          # absorb every slot's shared tiles/symmetry, broadcast our own
+    comms.read()          # absorb every slot's shared tiles/symmetry, broadcast our own
     map_info.recompute_derived()
     _update_harvest_zone()
 
@@ -203,4 +203,14 @@ def run():
 
 
     # Try healing adjacent building
+    for i in Direction:
+        if i.delta()[0] == 0 and i.delta()[1] == 0:
+            continue
+        if i.delta()[0] != 0 and i.delta()[1] != 0:
+            continue
+        pos = rc.get_position().add(i)
+        if rc.get_tile_builder_bot_id(pos) and rc.get_team(rc.get_tile_builder_bot_id(pos)) != rc.get_team() and rc.can_fire(pos):
+            rc.fire(pos)
+            break
     heal._do_best_heal()
+    comms.write()

@@ -3,7 +3,7 @@ from fcode import Controller, Direction, Position, EntityType
 import map_info
 from log import log
 from units.spawn_plan import choose_spawn_plan, draw_spawn_plan, INITIAL_SPAWN_COUNT, INITIAL_EXPLORE_MAX_STEPS
-
+import comms
 rc: Controller
 
 # --- Configurable ---
@@ -119,6 +119,11 @@ def run():
     #     rc.resign()
     # Sync round info
     map_info.update()
+    comms.read()          # absorb every slot's shared tiles/symmetry, broadcast our own
+    comms.write()
+    map_info.recompute_derived()
+    for i in map_info.iter_mask(map_info._bm_env[map_info._IDX_ENV_WALL]):
+        rc.draw_indicator_dot(i, 255, 255, 255)
     # The core's footprint never moves; compute the surrounding spawn ring once
     # _my_core is known (after the first observation).
     if not _spawn_tiles:
@@ -145,6 +150,6 @@ def run():
             # First spawn according to initial plan, then spawn toward center
             if not _spawn_toward_plan(core_pos):
                 _spawn_toward_center()
-    ammo_amount = min(50, rc.get_current_round() * 2) - rc.get_global_ammo()
+    ammo_amount = min(min(50, rc.get_global_resources()-2), rc.get_current_round() * 2) - rc.get_global_ammo()
     if ammo_amount > 0 and rc.can_convert_ammo(ammo_amount):
         rc.convert_ammo(ammo_amount)

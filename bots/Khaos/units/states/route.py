@@ -4,6 +4,7 @@ import pathing
 from pathing import Pathing
 from fcode import *
 import units.builder
+import comms
 from log import log
 import sys
 rc: Controller = None
@@ -12,20 +13,6 @@ _cost_map: dict[int, tuple[int, int]] = {}  # tile index -> (min titanium cost, 
 COST_MAP_TTL = 100
 
 unpathable = 0
-
-
-def _can_build_preferred_conveyor(pos: Position, direction: Direction) -> bool:
-    ti = rc.get_global_resources()
-    reserve = map_info.ti_reserve()
-    return (
-        rc.can_build_conveyor(pos, direction)
-        and ti >= rc.get_conveyor_cost() + reserve
-    )
-
-
-def _build_preferred_conveyor(pos: Position, direction: Direction) -> EntityType:
-    rc.build_conveyor(pos, direction)
-    return EntityType.CONVEYOR
 
 def init(c: Controller):
     global rc, nav
@@ -173,9 +160,16 @@ def run():
             rc.destroy(destroy)
             map_info.update_at(destroy)
         direction = map_info.direction_to(destroy, nxt)
-        if _can_build_preferred_conveyor(destroy, direction):
-            _build_preferred_conveyor(destroy, direction)
+        if rc.can_build_conveyor(destroy, direction):
+            rc.build_conveyor(destroy, direction)
             map_info.update_at(destroy)
-    attempt_build()
+            return True
+        return False
+
+    built = attempt_build()
+    # cand_path[2] is the segment distance from the routed source to the accepting
+    # network; a distance-1 segment built now is the last hop, so the route is
+    # fully connected this turn. Report it so the core can tally completions.
+    if built and cand_path[2] == 1:
+        comms.note_route_complete()
     nav.move_adjacent(target_conveyor[0])
-    attempt_build()

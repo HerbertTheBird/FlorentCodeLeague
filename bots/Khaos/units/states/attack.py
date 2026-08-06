@@ -5,7 +5,7 @@ import pathing
 from pathing import Pathing
 import units.builder
 from log import DRAW_DEBUG, log
-
+import comms
 rc: Controller = None
 nav: Pathing = None
 
@@ -45,7 +45,7 @@ def init(c: Controller):
 
 
 SENTINEL_BUILDING_SCORE = [0] * map_info._NUM_ET
-SENTINEL_BUILDING_SCORE[map_info._IDX_CORE] = 16
+SENTINEL_BUILDING_SCORE[map_info._IDX_CORE] = 16 #duplicate value
 SENTINEL_BUILDING_SCORE[map_info._IDX_HARVESTER] = 0
 SENTINEL_BUILDING_SCORE[map_info._IDX_GUNNER] = 20
 SENTINEL_BUILDING_SCORE[map_info._IDX_SENTINEL] = 20
@@ -57,7 +57,7 @@ SENTINEL_BUILDING_SCORE[map_info._IDX_SPLITTER] = 8
 # Gunners snipe single high-value lanes: big bonus for core + backline turrets,
 # smaller gain on clustered infra (sentinels already out-damage them there).
 GUNNER_BUILDING_SCORE = [0] * map_info._NUM_ET
-GUNNER_BUILDING_SCORE[map_info._IDX_CORE] = 128
+GUNNER_BUILDING_SCORE[map_info._IDX_CORE] = 128 #duplicate value
 GUNNER_BUILDING_SCORE[map_info._IDX_HARVESTER] = 0
 GUNNER_BUILDING_SCORE[map_info._IDX_GUNNER] = 100
 GUNNER_BUILDING_SCORE[map_info._IDX_SENTINEL] = 100
@@ -852,6 +852,19 @@ _cached_claims = 0
 MAX_SCORE = 9
 
 def score():
+    global _SENT_CORE_BITS, _GUN_CORE_BITS_BY_STEP
+    core = map_info._IDX_CORE
+    if comms.route_total() < 2:
+        SENTINEL_BUILDING_SCORE[core] = 0
+        GUNNER_BUILDING_SCORE[core] = 0
+    else:
+        SENTINEL_BUILDING_SCORE[core] = 16
+        GUNNER_BUILDING_SCORE[core] = 128
+    # The hot scorers read the precomputed bit forms (_SENT_CORE_BITS /
+    # _GUN_CORE_BITS_BY_STEP), not the score lists, so re-derive them here or the
+    # gate above has no effect.
+    _SENT_CORE_BITS = _bits_of(SENTINEL_BUILDING_SCORE[core])
+    _GUN_CORE_BITS_BY_STEP = _step_bits_tuple(GUNNER_BUILDING_SCORE[core])
     global _cached_claims
     _cached_claims = _my_claims()
     return 9 if _cached_claims else 0

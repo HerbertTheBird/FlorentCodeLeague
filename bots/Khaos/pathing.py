@@ -20,8 +20,8 @@ Step: TypeAlias = tuple[int, int, int, int]
 # (dx, dy, cost, valid_from_mask)
 
 barrier_cost = 15
-threat_cost = 20
-conveyor_end_cost = 4
+threat_cost = 12
+conveyor_end_cost = 2
 
 
 # Offsets (dx, dy) such that lsb_pos = target_pos + (dx, dy) covers all 9

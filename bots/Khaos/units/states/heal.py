@@ -39,7 +39,6 @@ def _conv_zone():
     return visited
 
 
-_cached_launcher_t1 = None  # set by _find_chase_target when launcher fallback fires
 
 
 def _turret_covered_mask():

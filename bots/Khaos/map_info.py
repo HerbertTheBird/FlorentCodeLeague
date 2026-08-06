@@ -1036,6 +1036,35 @@ def update_symmetry_from_comms(sym_bits):
     if not (sym_bits & 4):
         _rot_sym = False
 
+
+def note_symmetry_conflict(n: int, env_idx: int) -> None:
+    """Eliminate any symmetry under which tile `n`'s mirror is already seen with
+    a different env. Mirrors the observation-based check in `update_at`, but for
+    tiles learned through comms (which `update_at` never sees). This is what lets
+    the core re-derive symmetry from the tiles builders relay, now that builders
+    no longer broadcast their own symmetry bits. No-op once symmetry is solved.
+
+    Call right after recording env `env_idx` at tile `n` in `_bm_env`/`_bm_seen`."""
+    global _hor_sym, _ver_sym, _rot_sym
+    if _solved_sym:
+        return
+    x = n % _width
+    y = n // _width
+    rx = _width - 1 - x
+    ry = _height - 1 - y
+    if _hor_sym:
+        fbit = 1 << (rx + y * _width)
+        if (_bm_seen & fbit) and not (_bm_env[env_idx] & fbit):
+            _hor_sym = False
+    if _ver_sym:
+        fbit = 1 << (x + ry * _width)
+        if (_bm_seen & fbit) and not (_bm_env[env_idx] & fbit):
+            _ver_sym = False
+    if _rot_sym:
+        fbit = 1 << (rx + ry * _width)
+        if (_bm_seen & fbit) and not (_bm_env[env_idx] & fbit):
+            _rot_sym = False
+
 def hor_flip(pos: Position) -> Position:
     return Position(_width - 1 - pos.x, pos.y)
 def ver_flip(pos: Position) -> Position:
