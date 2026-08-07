@@ -174,6 +174,68 @@ class Game:
                 "core_hp": [hp.get(cores.get(0, -1), 0), hp.get(cores.get(1, -1), 0)],
             }
 
+    def idle_streaks(self, team: int, min_run: int = 30):
+        """Longest run of consecutive turns each mobile unit spent not moving.
+
+        Builder bots are the only mobile unit, and they are identified by having
+        emitted at least one move event rather than by type (the spawn record
+        does not carry one). A long idle run means a bot that is alive, costing
+        us a unit slot and its share of builder cost scaling, and doing nothing
+        that shows up on the board.
+
+        Returns [(entity id, longest run, first turn of that run, last position)]
+        for units whose longest run reaches `min_run`, worst first.
+        """
+        pos: dict[int, tuple[int, int]] = {}
+        owner: dict[int, int] = {}
+        moved: set[int] = set()
+        alive: dict[int, tuple[int, int]] = {}    # id -> (spawn turn, death turn)
+        last_move: dict[int, int] = {}
+        best: dict[int, tuple[int, int]] = {}     # id -> (run, start turn)
+        for n, turn in enumerate(self.turns):
+            for ef, _w, ev in fields(turn):
+                if ef != 1:
+                    continue
+                for kind, _kw, body in fields(ev):
+                    if kind == 1:
+                        ent = sub(body, 1)
+                        if ent is None:
+                            continue
+                        eid = get(ent, 1)
+                        if eid is None:
+                            continue
+                        owner[eid] = get(ent, 2, 0)
+                        pos[eid] = _pos(get(ent, 3)) or (0, 0)
+                        alive[eid] = (n, None)
+                        last_move[eid] = n
+                    elif kind == 2:
+                        eid = get(body, 1)
+                        if eid is None:
+                            continue
+                        moved.add(eid)
+                        run = n - last_move.get(eid, n)
+                        if run > best.get(eid, (0, 0))[0]:
+                            best[eid] = (run, last_move.get(eid, n))
+                        last_move[eid] = n
+                        p2 = _pos(get(body, 2))
+                        if p2:
+                            pos[eid] = p2
+                    elif kind == 3:
+                        eid = get(body, 1)
+                        if eid in alive:
+                            alive[eid] = (alive[eid][0], n)
+        end = len(self.turns)
+        for eid in moved:
+            death = alive.get(eid, (0, None))[1] or end
+            run = death - last_move.get(eid, death)
+            if run > best.get(eid, (0, 0))[0]:
+                best[eid] = (run, last_move.get(eid, death))
+        out = [(eid, r, start, pos.get(eid))
+               for eid, (r, start) in best.items()
+               if r >= min_run and owner.get(eid, 0) == team]
+        out.sort(key=lambda x: -x[1])
+        return out
+
     def final(self) -> dict:
         state = None
         for state in self.replay():
@@ -212,6 +274,19 @@ def cmd_curve(args) -> int:
     return 0
 
 
+def cmd_stuck(args) -> int:
+    for path in args.files:
+        g = Game(Path(path))
+        rows = g.idle_streaks(args.team, args.min_run)
+        total = len(g.turns)
+        frozen = sum(r[1] for r in rows)
+        print(f"{Path(path).name[:52]:52s} turns={total:4d} "
+              f"stuck_units={len(rows):2d} frozen_unit_turns={frozen}")
+        for eid, run, start, at in rows[:8]:
+            print(f"    id={eid:4d} idle {run:4d} turns from t{start:4d} at {at}")
+    return 0
+
+
 def cmd_map(args) -> int:
     g = Game(Path(args.file))
     glyph = {0: ".", 1: "#", 2: "o"}
@@ -235,6 +310,11 @@ def main() -> int:
     c.add_argument("file")
     c.add_argument("--every", type=int, default=50)
     c.set_defaults(func=cmd_curve)
+    k = sub.add_parser("stuck", help="mobile units that stopped moving for long runs")
+    k.add_argument("files", nargs="+")
+    k.add_argument("--team", type=int, default=1, help="0 = player A, 1 = player B")
+    k.add_argument("--min-run", type=int, default=30)
+    k.set_defaults(func=cmd_stuck)
     m = sub.add_parser("map", help="terrain of the map a replay was played on")
     m.add_argument("file")
     m.set_defaults(func=cmd_map)

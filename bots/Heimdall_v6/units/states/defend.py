@@ -443,6 +443,17 @@ def _hold_block() -> None:
             return
         if _try_seal(enemy, block, my_pos):
             return
+        # Nothing to build and nowhere to move: we are a parked body. This is a
+        # known cost, not an oversight. `tools/replay.py stuck` on a 0-5 ladder
+        # loss shows blockers frozen for up to 936 of 1000 turns, and us
+        # carrying ~1.5-2x the winner's idle unit-turns across the match.
+        #
+        # Releasing the claim after 25 idle turns (with a 60-turn cooldown so the
+        # bot does not immediately re-take the tile it is standing on) was
+        # implemented and measured at 61.7% against 62.5% — not proven worse, but
+        # not better either, because letting our blocker go also lets theirs go.
+        # The idle turns are real; converting them into an advantage needs
+        # something better than simply walking away.
         return
 
     if my_pos != block:

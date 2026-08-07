@@ -31,6 +31,19 @@ SIEGE_MAX_UNITS = 20
 # conveyor and harvester construction.
 ECON_BUFFER = 150
 ECON_BUFFER_MANY = 350
+# On 500 starting titanium this buffer keeps clearing, so the opening runs to
+# about 7 builders costing ~336 Ti to builder-cost scaling before the first
+# harvester. That looks obviously wasteful and is not: gating extra spawns on
+# having an economy was measured at two strengths and both lost, monotonically
+# in the direction of *fewer* builders being worse.
+#
+#     bootstrap buffer   none(=150, ~7 bots)   220 (~6 bots)   320 (~4 bots)
+#     full suite               62.5%               59.8%           57.6%
+#
+# loki alone prefers the lean opening (71.2% at 320 against 62.1% now), so it is
+# not that early builders are useless — it is that against most opponents the
+# extra bodies out-earn the scaling they cost. Leave it alone without new
+# evidence.
 
 _spawn_plan: list[Direction] | None = None
 _num_spawned = 0
