@@ -444,7 +444,15 @@ def _hold_block() -> None:
         if _try_seal(enemy, block, my_pos):
             return
         # Nothing to build and nowhere to move: we are a parked body. This is a
-        # known cost, not an oversight. `tools/replay.py stuck` on a 0-5 ladder
+        # known cost, not an oversight, and two ways out have been measured.
+        #
+        # Releasing the claim after 25 idle turns: 61.7% against 62.5%.
+        # Dropping to a score the economy beats whenever the enemy is already
+        # denied by terrain or our own barriers (i.e. the block holds without
+        # us): 62.5% against 64.4%. Both look obviously right and both lose --
+        # the body standing here is load-bearing even when the tile in front of
+        # the enemy appears sealed, because a barrier can be broken and terrain
+        # can be walked around, and neither is true of a builder. `tools/replay.py stuck` on a 0-5 ladder
         # loss shows blockers frozen for up to 936 of 1000 turns, and us
         # carrying ~1.5-2x the winner's idle unit-turns across the match.
         #
