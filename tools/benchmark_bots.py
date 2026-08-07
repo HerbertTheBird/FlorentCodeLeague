@@ -44,6 +44,15 @@ DEFAULT_MAPS_DIR = PROJECT_ROOT / "maps"
 # and the rest as a check against regressions in play we already relied on.
 DEFAULT_SUITE = ("Ladder_v36", "loki", "Khaos", "Hermod", "Heimdall_v3")
 
+# Not every opponent is equally informative. Ladder_v36 is a snapshot of a build
+# that actually played ranked, so it predicts ladder results far better than the
+# rest, which are old bots the field has long overtaken -- a change once gained
+# several points against them while losing unrated matches against real teams.
+# The weighted line is the one to read; the flat one is kept as a regression
+# check. Nothing here beats an actual UR against a top team.
+SUITE_WEIGHTS = {"Ladder_v36": 4.0}
+DEFAULT_WEIGHT = 1.0
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -402,6 +411,18 @@ def print_suite(matches: list[dict[str, Any]], bot: str, suite: list[str]) -> No
     for opponent in suite:
         print(f"  {opponent:<16} {_score_line(record(by_opponent[opponent], bot))}")
     print(f"  {'OVERALL':<16} {_score_line(record(matches, bot))} ({len(matches)} matches)")
+    num = den = 0.0
+    for opponent in suite:
+        tally = record(by_opponent[opponent], bot)
+        played = tally["W"] + tally["L"] + tally["D"]
+        if not played:
+            continue
+        w = SUITE_WEIGHTS.get(opponent, DEFAULT_WEIGHT)
+        num += w * (tally["W"] + 0.5 * tally["D"]) / played
+        den += w
+    if den:
+        weights = ", ".join(f"{o}x{SUITE_WEIGHTS.get(o, DEFAULT_WEIGHT):g}" for o in suite)
+        print(f"  {'WEIGHTED':<16} {100 * num / den:5.1f}%   ({weights})")
     if any(match.get("runtime_warning") for match in matches):
         print("! indicates that a bot emitted a Python traceback during the match.")
 

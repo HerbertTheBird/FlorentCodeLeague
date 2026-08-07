@@ -48,7 +48,7 @@ nav: Pathing = None
 
 # Above attack (9): once a builder is standing next to the enemy's supply line,
 # shutting it off beats whatever else it was going to do out there.
-CUT_SCORE = 10
+CUT_SCORE = 13
 # Contesting the open end of an enemy line is the cheapest economic action in the
 # bot — 3 Ti, one turn, no demolition — so it outranks cutting at their core.
 LINE_SCORE = 11
@@ -79,8 +79,12 @@ LINE_RANGE = 7
 # Khaos alone). Losing an ore tile is cheaper than fighting for it: the harvest
 # state simply picks another.
 
-# Only builders already this close to the enemy core take the cut job.
-CUT_RANGE = 8
+# Map-wide: builders travel to the enemy core to seal it rather than only doing
+# it when they happen to be nearby. Their core has exactly eight tiles through
+# which every resource must pass, a barrier on each is 3 Ti, and a builder
+# standing there is not needed afterwards. With the block/trap defence switched
+# off we have the bodies to spare.
+CUT_RANGE = 99
 
 # Targets we stood next to and could not act on, and the round each becomes
 # eligible again.

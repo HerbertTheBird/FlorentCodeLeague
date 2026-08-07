@@ -51,14 +51,16 @@ Measured results
     vs Khaos       54.5%    65.2%
     vs Hermod      34.8%    71.2%
     vs Heimdall v3 45.5%    48.5%
-    vs Ladder_v36     -      63.6%   <- the column that matters
+    vs Ladder_v36     -      72.7%   <- the column that matters
 
 Measured against Ladder_v36, both sides, 66 matches each:
 
     tap only (defence on)                     57.6%
     aggressive turrets only                   60.6%
     defence off only                          62.1%
-    defence off + turrets + gated tap         63.6%   <- shipped
+    defence off + turrets + gated tap         63.6%
+    ... + rushing the enemy core to seal it    72.7%   <- shipped
+    ... + also barriering enemy ore harder     66.7%   (worse: they compete)
     defence off + turrets + ungated tap       57.6%
     gated tap alone                           47.0%
 
