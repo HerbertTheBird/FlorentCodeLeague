@@ -68,6 +68,21 @@ LINE_RANGE = 7
 # Only builders already this close to the enemy core take the cut job.
 CUT_RANGE = 8
 
+# Tried and rejected: sealing as a *passive* action. A helper run after the
+# chosen state, gated on has_op so it only fired when the turn's move and action
+# were both still unspent, barriering any enemy feed tile or conveyor line end we
+# happened to be standing next to. Free by construction, and it did fire -- but
+# only 0-3 times a game, because builders are rarely cardinally adjacent to those
+# tiles. 63.6% against 64.4%: noise, and code for nothing.
+#
+# Tried and rejected: chipping down isolated enemy turrets instead of answering
+# them with our own (2 Ti a turn against a build, a unit slot, ammo, and +10% on
+# every future turret). Fired plenty once the isolation test was loosened to 2
+# tiles -- 37 times in one game against Khaos -- and still lost: 62.5% against
+# 64.4%. Twenty builder-turns to remove one turret is not worth it on average,
+# though the split is interesting (Heimdall v3 54.5% -> 60.6%, Khaos 65.2% ->
+# 57.6%), so it may be worth revisiting as an opponent-conditional behaviour.
+
 # Targets we stood next to and could not act on, and the round each becomes
 # eligible again.
 RETRY_COOLDOWN = 30
