@@ -1,3 +1,39 @@
+# --- pay as you go ------------------------------------------------------------
+# harvest and route both quote the *entire* remaining conveyor chain up front and
+# refuse the project unless all of it is affordable this turn. That silently caps
+# how far from our network a harvester can ever be built, and it is why our
+# economy stays small: across five games against sporks we finish on 145
+# conveyors and 22 harvesters to their 490 and 46.
+#
+# Quoting only the next few hops fixes it. A conveyor laid this turn is useful
+# next turn whether or not the rest of the chain exists, and route picks the dead
+# end up and extends it.
+#
+# Swept against Champion_v45 over all 33 maps, both sides. The horizon has a
+# plateau, not a threshold -- too short is worse than not doing it at all,
+# because the builder commits to chains it cannot finish:
+#
+#     3   42.4%      10  60.6%
+#     5   40.9%      11  54.5%
+#     8   56.1%      12  48.5%
+#     9   51.5%      16  42.4%
+#                    unbounded (v45) is the 50.0% baseline
+#
+# 8-11 are all above the baseline and 3/5/12/16 are all below, so the plateau is
+# supported by 264 matches rather than by the single best cell; 10 is the argmax
+# and sits in the middle of it, but read 60.6% as the top of a noisy peak whose
+# true value is nearer the ~55% the plateau averages.
+#
+# The effect on the maps we were losing is not marginal. saga -- 1-21 on the
+# ladder, our worst map by a wide margin -- goes from a loss at turn 144 on 34
+# conveyors and 750 Ti to a *win* at turn 487 on 101 conveyors and 4500 Ti.
+# hive goes 26 -> 97 conveyors and 1890 -> 4480 Ti. heart is the exception and
+# builds slightly fewer (42 -> 37); it still wins.
+#
+# Both call sites must use the same horizon: harvest quotes harvester + chain and
+# route quotes chain alone, and a harvester admitted under one budget whose chain
+# is refused under the other is the stranded-harvester case this is meant to fix.
+PAYG_HORIZON = 10
 from main import has_op
 import map_info
 import pathing
@@ -132,7 +168,7 @@ def run():
             unpathable |= cand_bit
             candidates &= ~cand_bit
             continue
-        cost = nav.conveyor_cost(cand_path[2])
+        cost = nav.conveyor_cost(min(cand_path[2], PAYG_HORIZON))
         _cost_map[cand_n] = (cost, rc.get_current_round())
         if rc.get_global_resources() < cost:
             log("can't afford", cost)
