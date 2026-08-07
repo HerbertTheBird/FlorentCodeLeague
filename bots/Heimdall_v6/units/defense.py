@@ -51,7 +51,13 @@ Measured results
     vs Khaos       54.5%    65.2%
     vs Hermod      34.8%    71.2%
     vs Heimdall v3 45.5%    48.5%
-    vs Ladder_v36     -      83.3%   <- the column that matters
+    vs Ladder_v36     -      78.8%
+
+Ladder_v36 is one bot, and beating it harder is not the same as beating the
+field. Three changes now have won here and lost on the ladder: the economy-first
+build (68.6% here, 36.0% unrated), and the near-side rush (83.3% here, 55.0%
+unrated against 78.8%/64.2% without it). Unrated matches grouped by submission
+version are the real measurement -- run tools/ur_summary.py.
 
 Measured against Ladder_v36, both sides, 66 matches each:
 
@@ -63,7 +69,7 @@ Measured against Ladder_v36, both sides, 66 matches each:
     ... + sealing the full 12-tile ring        74.2%
                                                (reproduced at 66 and 198 matches)
     ... + healing dropped below the economy    78.8%
-    ... + only near-side builders make the trip 83.3%  <- shipped
+    ... + only near-side builders make the trip 83.3%  (REVERTED: see below)
     ... + rush only once 3 harvesters are up   71.2%   (wrong lever)
     ... + siege-breaking for every building    60.6%   (over-triggers)
     ... + also barriering enemy ore harder     66.7%   (worse: they compete)

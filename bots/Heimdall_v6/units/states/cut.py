@@ -285,14 +285,13 @@ def score():
     core = _enemy_core()
     if core is None:
         return 0
-    # Only builders already on their half make the trip. A map-wide rush drags
-    # home builders across the board and they stop mining for the whole walk --
-    # against the fastest economy in the field that trade loses (sporks: 5-5
-    # before the rush, 2-13 after). Requiring the builder to be nearer their core
-    # than ours keeps the seal without paying the travel out of our own economy.
-    home = map_info._my_core
-    if home is not None and my_pos.distance_squared(core) > my_pos.distance_squared(home):
-        return 0
+    # Restricting the rush to builders already on their half was tried and
+    # reverted. It won locally by a wide margin (83.3% against Ladder_v36 versus
+    # 78.8%) and lost on the field: unrated games against the top five, grouped
+    # by submission version, gave 64.2% game win without it and 55.0% with. It
+    # did what it was designed to do -- sporks went 6-9 to 5-5 -- but Jython fell
+    # 12-8 to 6-9 and team lazy 24-6 to 9-6. Fixing the worst matchup by holding
+    # builders back cost more against the ones we were already beating.
     if my_pos.distance_squared(core) > CUT_RANGE * CUT_RANGE:
         return 0
 
