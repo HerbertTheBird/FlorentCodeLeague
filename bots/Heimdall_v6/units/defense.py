@@ -112,6 +112,29 @@ both lost. bfs_move really does answer "stay put" when the cheapest step is
 occupied, ~450 times a game on jackpot; fixing it scored 40.9%. A fixed bug is a
 behaviour change like any other and has to earn its place on the scoreboard.
 
+--- v45, measured head-to-head against Champion_v44 (66 matches each) --------
+
+    crew ratio harvesters*2 >= builders   54.5%   ADOPTED
+    crew ratio harvesters*1.5 >= builders 54.5%   (tie; *2 is the simpler form)
+    crew ratio harvesters*1 >= builders   51.5%
+    crew ratio harvesters*4 >= builders   48.5%
+    starting crew 5 instead of 4          48.5%
+    starting crew 3 instead of 4          43.9%
+    starting crew 6 instead of 4          39.4%
+    turret placement above the rush       50.0%   rejected
+    turret score floor 16 -> 10           50.0%   rejected
+    both of the above                     50.0%   rejected
+    harvest above the rush                50.0%   rejected
+    route above the rush                  50.0%   rejected
+    out-of-zone enemy-builder chase off   48.5%   rejected
+
+Everything that is not the crew ratio came back neutral. Five separate attempts
+to reorder the state priorities -- turrets, harvest, route, in either direction
+-- all landed within a match or two of even, which is worth knowing: the state
+ordering is not where the remaining points are. The one parameter that moves the
+number is how many builders we are willing to run per harvester, and the whole
+v44/v45 gain sits there.
+
 The disrupt family is the clearest dead end here. A state trace on a saga loss
 showed disrupt taking 414 of ~1130 builder turns -- 36% of the game -- to place
 12 barriers, which reads like an obvious waste. It is not: removing those turns
