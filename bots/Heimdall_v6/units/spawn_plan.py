@@ -86,6 +86,19 @@ def get_valid_directions(rc: Controller, core_pos: Position, width: int, height:
     return valid
 
 
+# Tried and rejected: making visible ore a *preference* between directions
+# rather than only a filter on which are admissible. `get_valid_directions`
+# already drops bearings with neither unexplored ground nor ore on them, but the
+# selection below then maximises pure angular spread, so a bearing with three ore
+# scores identically to one with none. Counting the ore hits and multiplying the
+# spread score by (1 + 0.6 * hits) pointed the opening at the ore we could
+# already see -- and lost 2.3 points over the full suite (64.4% -> 62.1%).
+#
+# The split says why it is not simply wrong: loki 68.2% -> 74.2%, but Khaos
+# 65.2% -> 59.1% and Heimdall v3 54.5% -> 48.5%. Concentrating the opening on
+# known ore wins the economy race and loses the map. Games also ran far longer,
+# which is the tell -- more of them reached the 1000-turn tiebreak because
+# neither side had the board presence to close.
 def pick_n_directions(pool, n: int):
     if len(pool) <= n:
         return list(pool)

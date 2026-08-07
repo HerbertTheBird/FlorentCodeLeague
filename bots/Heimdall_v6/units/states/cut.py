@@ -68,6 +68,14 @@ LINE_RANGE = 7
 # Only builders already this close to the enemy core take the cut job.
 CUT_RANGE = 8
 
+# Tried and rejected twice, and the second attempt settles the question. Passive
+# *stealing* -- the same has_op-gated helper, but splicing our conveyor onto the
+# line end (income) instead of a barrier (denial), which is worth several times
+# more when it lands -- never fired at all across four maps. The bottleneck is
+# not which action we take when adjacent to one of these tiles; it is that
+# builders are essentially never adjacent to one. Do not retry the passive family
+# without first changing where builders go.
+#
 # Tried and rejected: sealing as a *passive* action. A helper run after the
 # chosen state, gated on has_op so it only fired when the turn's move and action
 # were both still unspent, barriering any enemy feed tile or conveyor line end we
