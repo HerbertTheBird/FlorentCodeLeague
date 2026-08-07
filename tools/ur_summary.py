@@ -29,6 +29,11 @@ def main():
             continue
         if a.since and m["completedAt"] < a.since:
             continue
+        # Skip matches that are not ours at all. `--mine` has returned other
+        # teams' matches, and assuming "not team A means we are team B" silently
+        # inverted the result -- it reported a 2-3 loss to sporks as a 3-2 win.
+        if "Pantheon" not in (m["teamAName"], m["teamBName"]):
+            continue
         mine_is_a = m["teamAName"] == "Pantheon"
         opp = m["teamBName"] if mine_is_a else m["teamAName"]
         mine, theirs = ((m["scoreA"], m["scoreB"]) if mine_is_a
