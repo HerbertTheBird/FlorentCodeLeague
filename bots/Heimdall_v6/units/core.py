@@ -314,7 +314,19 @@ def run():
             # actual cost plus a working buffer is the dimensionally correct
             # version and keeps the workforce growing.
             buffer = ECON_BUFFER_MANY if ally_builder_count >= 12 else ECON_BUFFER
-            if titanium >= rc.get_builder_bot_cost() + buffer:
+            # A builder is only worth its cost if there is work for it. Builder
+            # cost scales +20% per build while a harvester scales +5%, so the
+            # seventh builder costs several harvesters, and the state trace on a
+            # saga loss shows the marginal builders falling through to disrupt
+            # (414 of ~1130 turns) and explore (206) -- walking, not building.
+            # We finished that game 7 builders / 2 harvesters against loki's
+            # 4 builders / 5 harvesters, and lost 390 Ti to 910. Tie workforce
+            # growth to income: past a small starting crew, only add a builder if
+            # the harvesters exist to pay for it.
+            free_crew = 4
+            harvesters = defense.my_count(map_info._IDX_HARVESTER)
+            crew_ok = ally_builder_count < free_crew or harvesters * 3 >= ally_builder_count
+            if crew_ok and titanium >= rc.get_builder_bot_cost() + buffer:
 
                 # First spawn according to initial plan, then spawn toward center
                 if not _spawn_toward_plan(core_pos):

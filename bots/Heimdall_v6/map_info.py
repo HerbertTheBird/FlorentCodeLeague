@@ -206,7 +206,7 @@ _bm_any_building: int = 0   # union of all tracked building bitmasks
 _bm_dir: list[int] = []   # per facing
 
 # Derived bitmasks
-_bm_blocked: int = 0            # walls + non-passable buildings + core area
+_bm_blocked: int = 0            # walls + every building except conveyors/splitters + both core areas (ownership is irrelevant — see _recompute_derived_structural)
 _bm_conveyors: int = 0          # all conveyor-type buildings
 _bm_conveyor_targets: int = 0   # output target tiles of conveyors
 _bm_my_core_area: int = 0       # my core 2x2 (update only in update)
@@ -221,7 +221,7 @@ _bm_conv_by_dir: list[int] = [0] * 8  # per facing: CONVEYOR tiles with that dir
 _bm_enemy_turret_threat: int = 0 # tiles any enemy turret (sentinel/gunner) can shoot (update only in update)
 _bm_others_5x5: int = 0          # 5x5 around other friendly builder bots
 _bm_others_3x3: int = 0          # 3x3 around other friendly builder bots
-_bm_passable_FFF: int = 0        # cached (_board_mask & ~get_avoid(False))
+_bm_passable_FFF: int = 0        # cached (_board_mask & ~get_avoid(False)) — now genuinely equal to it, so search and movement share one graph
 
 # Structural state version — bumped on any structural map change (build/destroy
 # of a tracked building, or symmetry-solved insertion). Used to cheaply
@@ -1417,12 +1417,36 @@ def _recompute_derived_structural() -> None:
     )
     _bm_conveyor_targets = _conveyor_target_tiles(_bm_conveyors)
 
+    # Ownership does not make a building walkable. Probing the live controller
+    # from a builder standing beside our own structures: adjacent to a FRIENDLY
+    # barrier, `can_move` said no on 345 of 345 samples, and beside our own core
+    # 15 of 15 — while the old mask here called both of those tiles free. Only
+    # conveyors and splitters are genuinely walk-through, and they are already
+    # excluded below by never being added.
+    #
+    # This matters far beyond `_bm_blocked` itself, because `_bm_passable_FFF`
+    # is derived from it and is the graph under every `nav.closest`,
+    # `nav.closest_within` and `pathing.claim_subset`. Movement, meanwhile, goes
+    # through `bfs_move`, which uses `get_avoid(False)` and gets it right. The
+    # two disagreeing is what let cut claim seal tiles it could never reach:
+    # `closest` reported the target four steps away straight through a barrier
+    # we had laid ourselves, `bfs_move` refused to take that step, and the state
+    # re-claimed the same tile every round (cut_walk_failed_reach4_seal=153 in a
+    # single instrumented game). On saga our own barriers sat inside
+    # `_bm_passable_FFF` on 819 of 981 builder-turns, up to 13 at once — exactly
+    # the map where we finish on fifteen barriers and lose.
+    #
+    # Note the core has to come from `_bm_my_core_area` rather than
+    # `bm_et[_IDX_CORE] & bm_team[...]`: the 2x2 footprint is synthesised by
+    # `build_core_areas()`, and using the entity mask would work only after that
+    # has run for a core we have actually seen.
     _bm_blocked = bm_env[_IDX_ENV_WALL]
     _bm_blocked |= bm_et[_IDX_HARVESTER]
     _bm_blocked |= bm_et[_IDX_GUNNER] | bm_et[_IDX_SENTINEL]
     _bm_blocked |= bm_et[_IDX_LAUNCHER]
-    _bm_blocked |= bm_et[_IDX_BARRIER] & ~bm_team[my_team_idx]
+    _bm_blocked |= bm_et[_IDX_BARRIER]
     _bm_blocked |= _bm_their_core_area
+    _bm_blocked |= _bm_my_core_area
 
     enemy_launchers = bm_et[_IDX_LAUNCHER] & ~bm_team[my_team_idx]
     _bm_enemy_launch_adj = 0
@@ -1690,18 +1714,25 @@ def can_place_at_restrictive(pos: Position):
     return False
 
 def is_passable(pos: Position):
+    """True if a builder bot could stand on `pos`.
+
+    Conveyors and splitters are the only buildings a bot may occupy, and they
+    are walkable regardless of who owns them. A friendly barrier or our own core
+    is exactly as solid as an enemy's: the controller refused `can_move` onto an
+    adjacent friendly barrier on all 345 probes and onto our own core on all 15,
+    even though it answered `is_passable`-style queries in the affirmative every
+    time. Callers here all mean "can a bot be on this tile" — screen and flank
+    tile picking, the adjacency sets for building a harvester, the blocker's
+    exit enumeration — so treating our own structures as free produced targets
+    that could be selected but never occupied. Keep this in step with
+    `_bm_blocked`; the two are the scalar and bitmask forms of one answer.
+    """
     if not in_bounds(pos): return False
     n = pos.x + pos.y * _width
     bit = 1 << n
     if _bm_env[_IDX_ENV_WALL] & bit: return False
     if _building_id[n] == 0: return True
-    my_team_idx = _my_team_idx
-    return bool(
-        (_bm_et[_IDX_CONVEYOR] | _bm_et[_IDX_SPLITTER]
-         | (_bm_et[_IDX_BARRIER] & _bm_team[my_team_idx])
-         | (_bm_et[_IDX_CORE] & _bm_team[my_team_idx])
-        ) & bit
-    )
+    return bool((_bm_et[_IDX_CONVEYOR] | _bm_et[_IDX_SPLITTER]) & bit)
 
 def get_avoid(is_route: bool, enemy_pov: bool = False) -> int:
     """Return a bitmask of tiles to avoid during pathfinding.

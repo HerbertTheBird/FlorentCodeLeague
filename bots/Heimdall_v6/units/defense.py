@@ -85,6 +85,40 @@ can gain several points against them while losing unrated matches against real
 opponents. Ladder_v36 is a snapshot of what is actually playing ranked; treat
 that column as the signal.
 
+--- v44, measured head-to-head against Champion_v43 (66 matches each) -------
+
+From v44 on, candidates are measured against the *current* champion rather than
+through Ladder_v36, so the number answers "does this beat what we ship" directly.
+
+    builder spawn tied to harvester count       60.6%   ADOPTED
+    _bm_passable truth fix                      59.1%   ADOPTED
+    cut unwedge (blocked-target cooldown)       56.1%   ADOPTED
+    enemy-core siege gate for turrets           53.0%   ADOPTED
+    disrupt range-limited to 5 tiles            50.0%   rejected (exactly 33-33)
+    enemy ore un-ban after turret leaves        47.0%   rejected
+    disrupt off entirely                        45.5%   rejected
+    disrupt gated on 3 harvesters + cap 4       45.5%   rejected
+    pay-as-you-go conveyor pricing              43.9%   rejected
+    bfs detour around occupied cheapest step    40.9%   rejected
+    heal without the enemy-builder chase         --     rejected (loses saga+hive)
+
+    the four adopted, combined                  71.2%
+
+The combination is worth more than any part and more than their sum suggests --
+the same interaction effect the tap gate showed above. Combinations get measured.
+
+Two of the rejects were real bugs, correctly diagnosed and correctly fixed, and
+both lost. bfs_move really does answer "stay put" when the cheapest step is
+occupied, ~450 times a game on jackpot; fixing it scored 40.9%. A fixed bug is a
+behaviour change like any other and has to earn its place on the scoreboard.
+
+The disrupt family is the clearest dead end here. A state trace on a saga loss
+showed disrupt taking 414 of ~1130 builder turns -- 36% of the game -- to place
+12 barriers, which reads like an obvious waste. It is not: removing those turns
+scores 45.5% and bounding them scores exactly 50.0%, because the builders doing
+it have nothing better available. The waste was downstream of the real problem,
+which was that we were running 7 builders on a 2-harvester economy.
+
 Where the gains came from, each measured over the full suite:
 
     43.0 -> 50.4   siege breaker (see `core_besiegers`)

@@ -4,6 +4,7 @@ import map_info
 import pathing
 from pathing import Pathing
 import units.builder
+import units.defense as defense
 from log import DRAW_DEBUG, log
 import comms
 rc: Controller = None
@@ -851,10 +852,56 @@ def _my_claims():
 _cached_claims = 0
 MAX_SCORE = 9
 
+# --- when the enemy core becomes a target ----------------------------------
+# The enemy core is worth 128 to a gunner and 16 to a sentinel, far above the
+# next-best building (harvester 60 / 40). Because the candidate filter keeps
+# only tiles scoring >= SCORE_THRESHOLD_FACTOR * best, switching the core on
+# does not merely add the core to the menu — it raises the bar so that mid-map
+# harvesters and conveyor lines stop qualifying, and turret placement collapses
+# onto the ring around their core. That is the whole point, and it is also why
+# it must not be on from turn 1: sieging before we can pay for turrets means one
+# lonely gunner at range with no economy behind it. Turrets alive within 5 tiles
+# of the enemy core at game end average 4.2 for the top ladder bots and 1.4 for
+# us, zero in half our games, so the bar for opening this wants to be low.
+#
+# The gate used to read comms.route_total() and nothing else. That input is a
+# poor lock for two reasons. It is structurally under-reported — route.py only
+# calls note_route_complete() on the turn it lays a *final* hop
+# (cand_path[2] == 1), so a harvester that harvest.py drops straight onto an
+# already-connected chain never reports at all. And it is a relay: a builder
+# reads the core's tally out of comms, so it depends on the core being alive and
+# on the builder having read the slot. When the tally stalls under 2 the enemy
+# core scores 0 for the entire game and every gunner we build aims at mid-map
+# infrastructure instead. Instrumented games show that happening for real —
+# on showdown the tally peaked at 1 and the core was worth nothing for all 216
+# rounds.
+#
+# So this adds two ways to open the gate rather than swapping the input out.
+# Instrumenting the swap first is what settled that: measured over ten maps,
+# `harvesters >= 2` alone is *worse* than the tally, not better. my_count()
+# reads this unit's own remembered building bitmaps, and a builder that leaves
+# home never sees our harvesters at all — on saga four of six builders finished
+# the game having observed at most one, so a harvester-only gate was open 18% of
+# the game where the tally version was open 82%. It is a fine reason to open the
+# gate and a terrible reason to keep it shut.
+#
+# Hence: the gate stays closed only while ALL THREE say "not yet", which makes
+# it strictly more permissive than the tally alone — it can never hide the core
+# in a position where the old code showed it. `my_count` is the cheap local
+# path, and it fires much earlier than the relay when it fires at all (antler
+# round 4 vs 26, jackpot 4 vs 11, moonrise 5 vs 94). SIEGE_OPEN_ROUND is the
+# backstop for the showdown case: a game where we still have no economy and no
+# reported route by turn 150 is one we are losing on titanium anyway, and
+# pressure on their core beats a fifth turret aimed at a conveyor.
+SIEGE_OPEN_ROUND = 150
+SIEGE_MIN_HARVESTERS = 2
+
 def score():
     global _SENT_CORE_BITS, _GUN_CORE_BITS_BY_STEP
     core = map_info._IDX_CORE
-    if comms.route_total() < 2:
+    if (comms.route_total() < 2
+            and defense.my_count(map_info._IDX_HARVESTER) < SIEGE_MIN_HARVESTERS
+            and rc.get_current_round() < SIEGE_OPEN_ROUND):
         SENTINEL_BUILDING_SCORE[core] = 0
         GUNNER_BUILDING_SCORE[core] = 0
     else:

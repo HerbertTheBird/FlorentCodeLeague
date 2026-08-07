@@ -86,8 +86,35 @@ LINE_RANGE = 7
 # off we have the bodies to spare.
 CUT_RANGE = 99
 
-# Targets we stood next to and could not act on, and the round each becomes
-# eligible again.
+# Targets this builder has proved it makes no progress on, and the round each
+# becomes eligible again. Two ways to earn an entry:
+#
+#   * We stood cardinally next to it and every action was illegal — a bot parked
+#     on the tile, no titanium spare, a turret covering it.
+#   * We were *not* adjacent, asked nav to close the gap, and did not move. A
+#     builder boxed in by walls, its own buildings or other bots gets stay-put
+#     back from the pathfinder every single turn, and score() cannot tell that
+#     apart from a builder halfway through a legitimate long walk.
+#
+# Only the first was recorded before, and it is the rare one. Instrumenting the
+# champion over the first 200 rounds of antler: 312 turns spent approaching a
+# seal target, 247 of them (79%) moving the builder nowhere, one builder
+# re-picking the same tile 142 rounds running — against 8 firings of the
+# adjacent-only guard. saga was 111 of 155 with a 109-round streak.
+#
+# Those are not merely idle turns. select_best_state() walks states in MAX_SCORE
+# order and breaks the moment the running best reaches the next state's ceiling,
+# so a builder frozen at cut's 11-13 stops attack (9), route (5), harvest (4),
+# heal (3), disrupt (2) and explore (1) from being *scored at all* for the length
+# of the streak. cut is about a tenth of every builder-turn, so most of that
+# tenth was being spent standing still at the highest non-emergency priority in
+# the bot.
+#
+# The cooldown is deliberately coarse: a single stay-put buys 30 rounds off, even
+# though some of those failures are a teammate blocking a corridor for one turn.
+# The cost of being wrong is that this builder falls through to the economy for a
+# while and then retries; the cost of being right and not acting is a builder
+# lost for a hundred rounds, which is what the streaks above measure.
 RETRY_COOLDOWN = 30
 _blocked_until: dict = {}
 
@@ -177,6 +204,25 @@ def protected_upstream() -> int:
     return protected
 
 
+def _usable(claimed: int) -> list[Position]:
+    """Our claimed tiles minus the ones we have already proved we cannot work.
+
+    Filtered *after* claim_subset, never before, and that ordering is load
+    bearing. The claim is a Voronoi partition of the candidate mask that every
+    builder recomputes independently from shared board state, and agreement
+    between builders depends on all of them feeding it the same mask.
+    `_blocked_until` is private to one builder — nobody else can see which tiles
+    it gave up on — so subtracting it from the mask we hand in would give us a
+    different partition to our teammates and two builders would start claiming
+    the same tile. Trimming our own share afterwards leaves everyone's partition
+    identical, and still lets us fall back to another tile inside our own zone
+    rather than dropping the whole state.
+    """
+    now = rc.get_current_round()
+    return [p for p in map_info.iter_mask(claimed)
+            if _blocked_until.get(p, -1) <= now]
+
+
 def _enemy_harvester_taps() -> int:
     """Free tiles beside an enemy harvester where we could put a conveyor.
 
@@ -246,8 +292,13 @@ def score():
         taps = _enemy_harvester_taps()
         if taps:
             mine = pathing.claim_subset(my_bit, map_info._bm_friendly_bots, taps, tie_self=True)
-            if mine:
-                best = min(map_info.iter_mask(mine),
+            # Taps and steals wrote `_blocked_until` in run() and then never read
+            # it, so a tap tile we could not reach or could not build on stayed
+            # top of the list every round. The seal loop below has always
+            # filtered; these two now do the same.
+            usable = _usable(mine)
+            if usable:
+                best = min(usable,
                            key=lambda p: (my_pos.distance_squared(p), p.x + p.y * w))
                 if my_pos.distance_squared(best) <= TAP_RANGE * TAP_RANGE:
                     _cached_target = best
@@ -270,8 +321,9 @@ def score():
         ends = _open_enemy_line_ends() & units.builder._harvest_zone
         if ends:
             mine = pathing.claim_subset(my_bit, map_info._bm_friendly_bots, ends, tie_self=True)
-            if mine:
-                best = min(map_info.iter_mask(mine),
+            usable = _usable(mine)
+            if usable:
+                best = min(usable,
                            key=lambda p: (my_pos.distance_squared(p), p.x + p.y * w))
                 if my_pos.distance_squared(best) <= LINE_RANGE * LINE_RANGE:
                     _cached_target = best
@@ -322,9 +374,7 @@ def score():
         mine = pathing.claim_subset(my_bit, map_info._bm_friendly_bots, claims, tie_self=True)
         if not mine:
             continue
-        now = rc.get_current_round()
-        usable = [p for p in map_info.iter_mask(mine)
-                  if _blocked_until.get(p, -1) <= now]
+        usable = _usable(mine)
         if not usable:
             continue
         best = min(usable, key=lambda p: (my_pos.distance_squared(p), p.x + p.y * w))
@@ -383,4 +433,22 @@ def run():
         # the turn rather than re-picking this tile every round.
         _blocked_until[target] = rc.get_current_round() + RETRY_COOLDOWN
         return
+
+    # Not adjacent: walk. The same stand-down applies when the walk itself gets
+    # nowhere, which is the far more common failure — see `_blocked_until`. Read
+    # `map_info._my_pos` either side of the call rather than trusting the return
+    # value: `update_move()` rewrites `_my_pos` on every successful step, so the
+    # comparison is a direct observation of whether we actually left the tile,
+    # whereas move_adjacent's boolean lies in both directions. It returns False
+    # for a target we are already standing on, and True for the stuck-turns
+    # escape hatch inside move_to, which fires a move in an arbitrary legal
+    # direction that need not be toward the target at all.
+    #
+    # This is not the turret-avoidance detour it looks like. Re-running the same
+    # call with avoid_turret=False over the 247 antler failures and the 111 saga
+    # ones returned stay-put in every single case, so the builder is genuinely
+    # enclosed and no amount of patience will get it there.
+    before = map_info._my_pos
     nav.move_adjacent(target)
+    if map_info._my_pos == before:
+        _blocked_until[target] = rc.get_current_round() + RETRY_COOLDOWN
