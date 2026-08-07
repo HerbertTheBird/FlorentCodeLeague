@@ -110,11 +110,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--jobs",
         type=int,
-        default=max(1, (os.cpu_count() or 2) // 2),
+        default=max(1, (os.cpu_count() or 4) // 4),
         help=(
-            "Matches to run concurrently (default: half the cores). Each match "
-            "is single-threaded, but a high --jobs on a loaded machine can cause "
-            "spurious TLE losses."
+            "Matches to run concurrently (default: a quarter of the cores). Each "
+            "match is single-threaded, but every one of them is racing a 10ms "
+            "per-turn budget, so oversubscribing the machine turns real results "
+            "into spurious TLE losses. A quarter leaves headroom for whatever "
+            "else is running."
         ),
     )
     parser.add_argument(

@@ -127,13 +127,15 @@ def feed_tiles(core: Position) -> list[Position]:
     faces, so the four diagonal corners of the ring can never feed the core and
     are not worth spending barriers on.
     """
+    # Full 12-tile ring rather than the 8 cardinal feed tiles. Corners cannot
+    # deliver into the core, but walling them still denies the enemy somewhere to
+    # stand and build beside their own core.
     out = []
-    for x in (core.x, core.x + 1):
-        out.append(Position(x, core.y - 1))
-        out.append(Position(x, core.y + 2))
-    for y in (core.y, core.y + 1):
-        out.append(Position(core.x - 1, y))
-        out.append(Position(core.x + 2, y))
+    for x in range(core.x - 1, core.x + 3):
+        for y in range(core.y - 1, core.y + 3):
+            if core.x <= x <= core.x + 1 and core.y <= y <= core.y + 1:
+                continue
+            out.append(Position(x, y))
     return [t for t in out if map_info.in_bounds(t)]
 
 
