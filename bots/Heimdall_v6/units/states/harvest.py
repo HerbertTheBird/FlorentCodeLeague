@@ -79,12 +79,19 @@ def _too_expensive():
         del _cost_map[n]
     return result
 
-MAX_SCORE = 4
+# Economy first. Claiming ore used to score 4 -- below route (5), heal (7),
+# attack (9), cut (10), steal (11) and blocking (12), i.e. almost the lowest
+# priority in the bot. Replays against the top-rated team show what that costs:
+# they finish with 2.1x our harvesters and 2.3x our conveyors, and their
+# harvesters sit a median 12-14 tiles from their core against our 5.5-7. They
+# expand; we turtle. Only the siege breaker (20) still outranks this, because a
+# turret shooting the core ends the game outright.
+MAX_SCORE = 14
 _cached_claims = 0
 def score():
     global _cached_claims
     _cached_claims = _my_claims()
-    return 4 if _cached_claims else 0
+    return MAX_SCORE if _cached_claims else 0
 
 CARD = [Direction.NORTH, Direction.EAST, Direction.SOUTH, Direction.WEST]
 

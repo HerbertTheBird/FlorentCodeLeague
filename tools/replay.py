@@ -255,8 +255,15 @@ class Game:
         return out
 
     def composition(self):
-        """[team][kind] -> how many of that kind the team ever built."""
+        """[team][kind] -> how many distinct entities of that kind a team built.
+
+        Deduplicated by entity id: the replay re-emits a spawn record for an
+        entity on later turns, so counting events inflates the totals several
+        times over -- badly enough to invent a 10x gunner gap that does not
+        exist.
+        """
         out = [collections.Counter(), collections.Counter()]
+        seen = set()
         for turn in self.turns:
             for ef, _w, ev in fields(turn):
                 if ef != 1:
@@ -271,6 +278,10 @@ class Game:
                     name = PAYLOAD_KIND.get(payload[0] if payload else -1)
                     if name is None:
                         continue
+                    eid = get(ent, 1)
+                    if eid in seen:
+                        continue
+                    seen.add(eid)
                     team = get(ent, 2, 0)
                     if 0 <= team < 2:
                         out[team][name] += 1

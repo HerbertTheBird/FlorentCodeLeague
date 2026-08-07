@@ -98,12 +98,14 @@ def _my_claims():
 
 _cached_claims = 0
 
-MAX_SCORE = 5
+# Connecting a harvester to the core sits just under claiming one: an unrouted
+# harvester delivers nothing, so the two have to move together.
+MAX_SCORE = 13
 def score():
     global _cached_claims
     units.builder.draw_mask(map_info._bm_dead_end, 0, 0, 255)
     _cached_claims = _my_claims()
-    return 5 if _cached_claims else 0
+    return MAX_SCORE if _cached_claims else 0
 
 def run():
     global unpathable

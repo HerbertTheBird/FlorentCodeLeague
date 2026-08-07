@@ -47,11 +47,11 @@ Measured results
 `tools/benchmark_bots.py`. Win rate for this bot:
 
                     was      now
-    vs loki        34.8%    72.7%
-    vs Khaos       54.5%    65.2%
-    vs Hermod      34.8%    65.2%
-    vs Heimdall v3 45.5%    54.5%
-    OVERALL        43.0%    64.4%
+    vs loki        34.8%    68.2%
+    vs Khaos       54.5%    56.1%
+    vs Hermod      34.8%    86.4%
+    vs Heimdall v3 45.5%    63.6%
+    OVERALL        43.0%    68.6%
 
 Where the gains came from, each measured over the full suite:
 
@@ -65,6 +65,8 @@ Where the gains came from, each measured over the full suite:
     61.4 -> 62.5   stealing enemy conveyor line ends (see `units/states/cut.py`)
     62.5 -> 64.4   unwedging `cut`: a bot parked on a feed tile made every action
                    illegal forever while score() re-picked the same tile
+    64.4 -> 68.6   economy first: harvest and route were scored 4 and 5, below
+                   almost everything, so we never expanded
 
 Both of the big wins came from reading match data rather than tuning. The first:
 losses were overwhelmingly `core_destroyed` at a median of ~99 rounds, and
