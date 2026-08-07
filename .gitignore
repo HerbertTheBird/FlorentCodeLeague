@@ -12,3 +12,4 @@ venv/
 # IDE / OS
 .idea/
 .DS_Store
+.ur_mapset
