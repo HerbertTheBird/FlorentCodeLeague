@@ -30,6 +30,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import collections
 from pathlib import Path
 import sys
 
@@ -106,6 +107,23 @@ def _pos(msg: bytes | None) -> tuple[int, int] | None:
 
 # --- game model -------------------------------------------------------------
 CORE_MAX_HP = 500
+
+# A spawn record carries no type field. It does carry exactly one payload field
+# per entity kind, whose *number* identifies the kind -- recovered by
+# cross-referencing max HP against GameConstants and, for the three kinds that
+# share 30 HP, by whether the tile is ore (harvester) and which side built it.
+#
+# Note the real constants are not the ones in llms-full.txt: a gunner is 25 HP
+# and a sentinel 40, the reverse of what the Cambridge docs say.
+PAYLOAD_KIND = {
+    10: "builder",     # 40 hp, the only mobile kind
+    11: "conveyor",    # 20
+    15: "harvester",   # 30, always on ore
+    18: "barrier",     # 30
+    21: "gunner",      # 25
+    22: "sentinel",    # 40
+    24: "launcher",    # 30
+}
 
 
 class Game:
@@ -236,6 +254,28 @@ class Game:
         out.sort(key=lambda x: -x[1])
         return out
 
+    def composition(self):
+        """[team][kind] -> how many of that kind the team ever built."""
+        out = [collections.Counter(), collections.Counter()]
+        for turn in self.turns:
+            for ef, _w, ev in fields(turn):
+                if ef != 1:
+                    continue
+                for kind, _kw, body in fields(ev):
+                    if kind != 1:
+                        continue
+                    ent = sub(body, 1)
+                    if ent is None:
+                        continue
+                    payload = [f for f, _w2, _v in fields(ent) if f >= 6]
+                    name = PAYLOAD_KIND.get(payload[0] if payload else -1)
+                    if name is None:
+                        continue
+                    team = get(ent, 2, 0)
+                    if 0 <= team < 2:
+                        out[team][name] += 1
+        return out
+
     def final(self) -> dict:
         state = None
         for state in self.replay():
@@ -287,6 +327,27 @@ def cmd_stuck(args) -> int:
     return 0
 
 
+KINDS = ["builder", "conveyor", "harvester", "barrier", "gunner", "sentinel", "launcher"]
+
+
+def cmd_compose(args) -> int:
+    head = " ".join(f"{k[:5]:>5s}" for k in KINDS)
+    print(f"{'file':40s} {'side':>4s} {head}")
+    tot = [collections.Counter(), collections.Counter()]
+    for path in args.files:
+        g = Game(Path(path))
+        comp = g.composition()
+        for team in (0, 1):
+            tot[team].update(comp[team])
+            row = " ".join(f"{comp[team][k]:5d}" for k in KINDS)
+            print(f"{Path(path).name[:40]:40s} {'AB'[team]:>4s} {row}")
+    print()
+    for team in (0, 1):
+        row = " ".join(f"{tot[team][k]:5d}" for k in KINDS)
+        print(f"{'TOTAL':40s} {'AB'[team]:>4s} {row}")
+    return 0
+
+
 def cmd_map(args) -> int:
     g = Game(Path(args.file))
     glyph = {0: ".", 1: "#", 2: "o"}
@@ -315,6 +376,9 @@ def main() -> int:
     k.add_argument("--team", type=int, default=1, help="0 = player A, 1 = player B")
     k.add_argument("--min-run", type=int, default=30)
     k.set_defaults(func=cmd_stuck)
+    c2 = sub.add_parser("compose", help="what each side built, by entity kind")
+    c2.add_argument("files", nargs="+")
+    c2.set_defaults(func=cmd_compose)
     m = sub.add_parser("map", help="terrain of the map a replay was played on")
     m.add_argument("file")
     m.set_defaults(func=cmd_map)

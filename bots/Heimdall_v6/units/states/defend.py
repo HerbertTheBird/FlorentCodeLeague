@@ -20,6 +20,13 @@ Three jobs, in priority order:
      and put one up: the sentry spots threats earlier than the core and throws a
      defender straight onto its block tile instead of walking it there.
 
+     Worth keeping even though the top-rated bot builds zero launchers in ten
+     observed games while we build 11-57. Removing ours was measured at 59.5%
+     against 64.4% (Heimdall v3 54.5% -> 45.5%). Their bot does not need a
+     launcher because it does not block; ours is built around blocking, and the
+     throw is what makes a block land in time. Copying a stronger bot's build
+     mix piecemeal does not transfer across architectures.
+
 Note builders cannot damage enemy builders in Florent — `fire()` only hits the
 building on the target tile. Containment is the only lever against a bot, which
 is why trapping matters so much more here than chip damage would.
