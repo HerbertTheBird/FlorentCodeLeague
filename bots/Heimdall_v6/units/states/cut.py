@@ -285,6 +285,14 @@ def score():
     core = _enemy_core()
     if core is None:
         return 0
+    # Only builders already on their half make the trip. A map-wide rush drags
+    # home builders across the board and they stop mining for the whole walk --
+    # against the fastest economy in the field that trade loses (sporks: 5-5
+    # before the rush, 2-13 after). Requiring the builder to be nearer their core
+    # than ours keeps the seal without paying the travel out of our own economy.
+    home = map_info._my_core
+    if home is not None and my_pos.distance_squared(core) > my_pos.distance_squared(home):
+        return 0
     if my_pos.distance_squared(core) > CUT_RANGE * CUT_RANGE:
         return 0
 

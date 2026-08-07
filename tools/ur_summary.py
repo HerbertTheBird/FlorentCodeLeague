@@ -1,53 +1,71 @@
 #!/usr/bin/env python3
-"""Summarise recent unrated matches — the closest thing to a real benchmark.
+"""Summarise unrated matches, grouped by which of OUR submissions played them.
 
-URs run the *active* submission against another team's live bot, so they are the
-only local-ish signal calibrated to the current field. Rate-limited to 5 per 10
-minutes, so treat each batch as a small sample and read game totals, not just
-match wins.
+URs are the only local signal calibrated to the live field, but attributing a
+batch by wall-clock is unreliable: opponents queue URs against us too, and those
+run whatever we had active at the time. The match record carries
+teamAVersion/teamBVersion, so group by that instead and the question "how did
+v41 actually do" has an exact answer.
 
-    python3 tools/ur_summary.py [--since ISO8601] [--limit N]
+    python3 tools/ur_summary.py [--limit N] [--version V] [--ladder]
 """
-import argparse, json, subprocess, sys, collections
+import argparse, collections, json, subprocess, sys
+
+TEAM = "Pantheon"
+
+
+def fetch(limit, kind):
+    out = subprocess.run(
+        ["fcode", "match", "list", "--mine", "--type", kind, "--limit", str(limit), "--json"],
+        capture_output=True, text=True).stdout
+    line = next((l for l in reversed(out.splitlines()) if l.strip().startswith(("{", "["))), None)
+    if not line:
+        return []
+    d = json.loads(line)
+    return d["matches"] if isinstance(d, dict) else d
+
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--since", help="ISO timestamp; only matches completed after")
-    ap.add_argument("--limit", type=int, default=40)
+    ap.add_argument("--limit", type=int, default=100)
+    ap.add_argument("--version", type=int, help="only this submission version")
+    ap.add_argument("--ladder", action="store_true", help="ladder instead of unrated")
     a = ap.parse_args()
-    raw = subprocess.run(["fcode", "match", "list", "--mine", "--type", "unrated",
-                          "--limit", str(a.limit), "--json"],
-                         capture_output=True, text=True).stdout
-    line = next((l for l in reversed(raw.splitlines()) if l.strip().startswith(("{", "["))), None)
-    if not line:
-        print("no JSON from fcode", file=sys.stderr); return 1
-    d = json.loads(line)
-    ms = d["matches"] if isinstance(d, dict) else d
-    rows, tally = [], collections.Counter()
-    for m in ms:
+
+    rows = []
+    for m in fetch(a.limit, "ladder" if a.ladder else "unrated"):
         if m.get("status") != "complete":
             continue
-        if a.since and m["completedAt"] < a.since:
+        if TEAM not in (m["teamAName"], m["teamBName"]):
             continue
-        # Skip matches that are not ours at all. `--mine` has returned other
-        # teams' matches, and assuming "not team A means we are team B" silently
-        # inverted the result -- it reported a 2-3 loss to sporks as a 3-2 win.
-        if "Pantheon" not in (m["teamAName"], m["teamBName"]):
-            continue
-        mine_is_a = m["teamAName"] == "Pantheon"
-        opp = m["teamBName"] if mine_is_a else m["teamAName"]
-        mine, theirs = ((m["scoreA"], m["scoreB"]) if mine_is_a
-                        else (m["scoreB"], m["scoreA"]))
-        rows.append((m["completedAt"][11:16], opp, mine, theirs))
-        tally["W" if mine > theirs else "L"] += 1
-        tally["gm"] += mine; tally["gt"] += theirs
-    for t, opp, mi, th in sorted(rows):
-        print(f"  {t} vs {opp:22s} {mi}-{th} {'W' if mi > th else 'L'}")
-    g = tally["gm"] + tally["gt"]
-    if g:
-        print(f"\n  {tally['W']}W-{tally['L']}L matches | games {tally['gm']}-{tally['gt']} "
-              f"({100 * tally['gm'] / g:.1f}% game win)")
+        mine_a = m["teamAName"] == TEAM
+        ver = m["teamAVersion"] if mine_a else m["teamBVersion"]
+        opp = m["teamBName"] if mine_a else m["teamAName"]
+        mine, theirs = ((m["scoreA"], m["scoreB"]) if mine_a else (m["scoreB"], m["scoreA"]))
+        rows.append((ver, m["completedAt"][11:16], opp, mine, theirs))
+
+    if a.version:
+        rows = [r for r in rows if r[0] == a.version]
+
+    by = collections.defaultdict(lambda: [0, 0, 0, 0])
+    for ver, _t, _opp, mine, theirs in rows:
+        by[ver][0] += mine > theirs
+        by[ver][1] += mine < theirs
+        by[ver][2] += mine
+        by[ver][3] += theirs
+
+    for ver in sorted(by):
+        w, l, gm, gt = by[ver]
+        g = gm + gt
+        print(f"  v{ver}: {w}W-{l}L matches | games {gm}-{gt} "
+              f"({100 * gm / g:.1f}% game win)" if g else f"  v{ver}: no games")
+
+    if a.version:
+        print()
+        for ver, t, opp, mine, theirs in sorted(rows, key=lambda r: r[1]):
+            print(f"    {t} vs {opp:24s} {mine}-{theirs} {'W' if mine > theirs else 'L'}")
     return 0
+
 
 if __name__ == "__main__":
     raise SystemExit(main())

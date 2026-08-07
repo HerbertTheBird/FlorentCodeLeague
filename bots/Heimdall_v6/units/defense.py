@@ -51,7 +51,7 @@ Measured results
     vs Khaos       54.5%    65.2%
     vs Hermod      34.8%    71.2%
     vs Heimdall v3 45.5%    48.5%
-    vs Ladder_v36     -      78.8%   <- the column that matters
+    vs Ladder_v36     -      83.3%   <- the column that matters
 
 Measured against Ladder_v36, both sides, 66 matches each:
 
@@ -62,7 +62,9 @@ Measured against Ladder_v36, both sides, 66 matches each:
     ... + rushing the enemy core to seal it    72.7%
     ... + sealing the full 12-tile ring        74.2%
                                                (reproduced at 66 and 198 matches)
-    ... + healing dropped below the economy    78.8%   <- shipped
+    ... + healing dropped below the economy    78.8%
+    ... + only near-side builders make the trip 83.3%  <- shipped
+    ... + rush only once 3 harvesters are up   71.2%   (wrong lever)
     ... + siege-breaking for every building    60.6%   (over-triggers)
     ... + also barriering enemy ore harder     66.7%   (worse: they compete)
     defence off + turrets + ungated tap       57.6%
