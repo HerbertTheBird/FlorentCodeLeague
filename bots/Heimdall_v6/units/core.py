@@ -323,14 +323,22 @@ def run():
             # 4 builders / 5 harvesters, and lost 390 Ti to 910. Tie workforce
             # growth to income: past a small starting crew, only add a builder if
             # the harvesters exist to pay for it.
-            # Swept against Champion_v44 over all 33 maps, both sides. The
-            # ratio is the sensitive parameter and tighter is better up to a
-            # point: harvesters*4 48.5%, *3 (as shipped in v44) 50.0%, *2 54.5%,
-            # *1.5 54.5%, *1 51.5%. The starting crew is sharply peaked at 4 --
-            # 3 scores 43.9% and 5 scores 48.5% -- so it stays put.
+            # Swept twice, all 33 maps both sides, against the champion of the
+            # day. On the v44 base (before pay-as-you-go): *4 48.5%, *3 50.0%,
+            # *2 54.5%, *1.5 54.5%, *1 51.5%. Re-swept on the v46 base once
+            # pay-as-you-go had changed the economy, and the optimum moved
+            # tighter as you would expect when harvesters get cheaper to reach:
+            # *4 45.5%, *3 47.0%, *2 50.0% (baseline), *1.5 54.5%, *1 50.0%.
+            #
+            # *1.5 is the only setting that has beaten or matched every rival on
+            # both bases, which is why it wins over *2 on a 36-30 margin that
+            # would not carry on its own.
+            #
+            # The starting crew is sharply peaked at 4 -- 3 scores 43.9%, 5
+            # scores 48.5%, 6 scores 39.4% -- so it stays put.
             free_crew = 4
             harvesters = defense.my_count(map_info._IDX_HARVESTER)
-            crew_ok = ally_builder_count < free_crew or harvesters * 2 >= ally_builder_count
+            crew_ok = ally_builder_count < free_crew or harvesters * 3 >= ally_builder_count * 2
             if crew_ok and titanium >= rc.get_builder_bot_cost() + buffer:
 
                 # First spawn according to initial plan, then spawn toward center
