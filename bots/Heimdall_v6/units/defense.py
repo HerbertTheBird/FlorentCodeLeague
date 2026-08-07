@@ -128,6 +128,22 @@ behaviour change like any other and has to earn its place on the scoreboard.
     route above the rush                  50.0%   rejected
     out-of-zone enemy-builder chase off   48.5%   rejected
 
+The defence constants were re-swept after the economy changed, against
+Champion_v45:
+
+    MIN_HARVESTERS 2 -> 4                 33.3%
+    MAX_BARRIERS 12 -> 6                  34.8%
+    block/trap/sentry family back on      48.5%   (ENABLED stays False)
+    MAX_BARRIERS 12 -> 20                 51.5%
+    MAX_BARRIERS 12 -> 30                 51.5%
+    MAX_BARRIERS 12 -> 999                51.5%
+
+Not shipped. The last three are identical because the cap stops binding around
+20, so those are one measurement and not three, and 34-32 is not a result. The
+useful half of that sweep is the downside: cutting the cap to 6 costs 15 points
+and raising MIN_HARVESTERS to 4 costs 17, so both constants are load-bearing in
+the direction of *more* barriers and *less* gating, and neither wants tightening.
+
 Everything that is not the crew ratio came back neutral. Five separate attempts
 to reorder the state priorities -- turrets, harvest, route, in either direction
 -- all landed within a match or two of even, which is worth knowing: the state
