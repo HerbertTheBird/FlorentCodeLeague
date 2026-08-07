@@ -58,6 +58,14 @@ LINE_SCORE = 11
 # conveyor is worth roughly a whole harvester of *relative* income.
 TAP_SCORE = 12
 TAP_RANGE = 8
+# A tap only pays if the titanium can actually get home. One conveyor beside
+# their harvester is the start of a chain, not the whole thing, and `route`
+# scores 5 -- near the bottom -- so a long chain frequently never gets finished.
+# Instrumented games show taps placed with gaps of 2-6 tiles to our own network
+# alongside others at 16 and 20, and the far ones are pure waste: we pay 3 Ti,
+# they lose the output into a dead end, and none of it reaches us. Cap the gap so
+# every tap we pay for is one route can plausibly close.
+TAP_MAX_GAP = 4
 MAX_SCORE = TAP_SCORE
 
 # How far a builder will travel to contest an enemy line end.
@@ -181,7 +189,19 @@ def _enemy_harvester_taps() -> int:
             & ~map_info._bm_friendly_bots
             & ~map_info._bm_enemy_bots
             & ~map_info._bm_enemy_turret_threat)
-    return adjacent & free
+    candidates = adjacent & free
+    if not candidates:
+        return 0
+    # Keep only tiles within reach of our own conveyor network or core, so the
+    # chain home is short enough that route will actually finish it.
+    ours = ((map_info._bm_conveyors & map_info._bm_team[map_info._my_team_idx])
+            | map_info._bm_my_core_area)
+    if not ours:
+        return 0
+    reach = ours
+    for _ in range(TAP_MAX_GAP):
+        reach = map_info.expand_manhattan(reach)
+    return candidates & reach
 
 
 def _open_enemy_line_ends() -> int:
