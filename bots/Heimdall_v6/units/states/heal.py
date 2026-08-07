@@ -247,7 +247,13 @@ def _heal_targets():
 
 _cached_chase_target = None  # set by score(), reused by run()
 
-MAX_SCORE = 8
+# Healing is repair, and repair loses to removal. A heal restores 4 HP for a
+# whole builder turn; a gunner takes 10 off per round, so chasing damage around
+# is a race we lose while the thing causing it keeps working. Dropped below
+# route (5) and harvest (4) so a builder only falls back on healing when it has
+# nothing productive left -- the opportunistic adjacent heal in builder.run()
+# still runs every turn regardless and costs nothing.
+MAX_SCORE = 3
 def score():
     # Always refresh chase target so run() uses a current value when it falls
     # through to the chase fallback (case 2 in run()). Previously this was
@@ -257,7 +263,7 @@ def score():
 
     if _very_damaged_targets():
         # units.builder.draw_mask(_very_damaged_targets(), 255, 0, 0)
-        return 7
+        return MAX_SCORE
 
     target = _cached_chase_target
     # log(target)
@@ -265,10 +271,10 @@ def score():
     if target is not None:
         if _conv_zone() & (1<<(target.x + target.y * map_info._width)):
             log("high priority heal", target)
-            return 7
+            return MAX_SCORE
         else:
             log("low priority heal", target)
-            return 2.5
+            return 1.5
     return 0
 
 
