@@ -36,8 +36,13 @@ from typing import Any
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_MAPS_DIR = PROJECT_ROOT / "maps"
 
-# The standard regression suite: a spread of playstyles to benchmark against.
-DEFAULT_SUITE = ("loki", "Khaos", "Hermod", "Heimdall_v3")
+# The regression suite. Ladder_v36 is a snapshot of what is actually playing
+# ranked, and it leads deliberately: the other four are old bots that the field
+# has long overtaken, and a change can gain several points against them while
+# losing unrated matches against real opponents -- which is exactly what
+# happened to the economy-first build. Treat the Ladder_v36 column as the signal
+# and the rest as a check against regressions in play we already relied on.
+DEFAULT_SUITE = ("Ladder_v36", "loki", "Khaos", "Hermod", "Heimdall_v3")
 
 
 def parse_args() -> argparse.Namespace:

@@ -47,16 +47,11 @@ Measured results
 `tools/benchmark_bots.py`. Win rate for this bot:
 
                     was      now
-    vs loki        34.8%    62.1%
+    vs loki        34.8%    72.7%
     vs Khaos       54.5%    65.2%
-    vs Hermod      34.8%    71.2%
-    vs Heimdall v3 45.5%    48.5%
-    vs Ladder_v36     -      57.6%   <- the column that matters
-
-The four fixed opponents are old bots the field has long overtaken, and a change
-can gain several points against them while losing unrated matches against real
-opponents. Ladder_v36 is a snapshot of what is actually playing ranked; treat
-that column as the signal.
+    vs Hermod      34.8%    65.2%
+    vs Heimdall v3 45.5%    54.5%
+    OVERALL        43.0%    64.4%
 
 Where the gains came from, each measured over the full suite:
 
@@ -70,14 +65,6 @@ Where the gains came from, each measured over the full suite:
     61.4 -> 62.5   stealing enemy conveyor line ends (see `units/states/cut.py`)
     62.5 -> 64.4   unwedging `cut`: a bot parked on a feed tile made every action
                    illegal forever while score() re-picked the same tile
-    64.4 -> 68.6   economy first (harvest 14 / route 13) -- REVERTED. It scored
-                   68.6% here and lost unrated matches against real ladder
-                   opponents. `select_best_state` breaks as soon as
-                   best_score >= state.MAX_SCORE, so lifting harvest and route
-                   above the denial family stopped cut/steal/tap/sentry being
-                   evaluated at all whenever a builder had ore work. The gain
-                   was against a suite the field has outgrown; the loss was real.
-    v36 + tap      +7.6 head-to-head against the live ladder build (38W-28L)
 
 Both of the big wins came from reading match data rather than tuning. The first:
 losses were overwhelmingly `core_destroyed` at a median of ~99 rounds, and

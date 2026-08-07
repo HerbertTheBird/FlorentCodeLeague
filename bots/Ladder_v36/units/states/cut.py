@@ -52,13 +52,7 @@ CUT_SCORE = 10
 # Contesting the open end of an enemy line is the cheapest economic action in the
 # bot — 3 Ti, one turn, no demolition — so it outranks cutting at their core.
 LINE_SCORE = 11
-# Tapping an enemy harvester is the cheapest economic action available: their
-# harvester is already built and running, so we pay only for the conveyor, and
-# every stack that comes to us is one that does not reach them. One 3 Ti
-# conveyor is worth roughly a whole harvester of *relative* income.
-TAP_SCORE = 12
-TAP_RANGE = 8
-MAX_SCORE = TAP_SCORE
+MAX_SCORE = LINE_SCORE
 
 # How far a builder will travel to contest an enemy line end.
 LINE_RANGE = 7
@@ -163,27 +157,6 @@ def protected_upstream() -> int:
     return protected
 
 
-def _enemy_harvester_taps() -> int:
-    """Free tiles beside an enemy harvester where we could put a conveyor.
-
-    A harvester feeds whatever sits beside it and conveyors accept input from
-    either team, so our conveyor next to theirs takes a share of the output
-    straight to our core -- no harvester of our own required.
-    """
-    enemy = map_info._bm_team[1 - map_info._my_team_idx]
-    harvesters = map_info._bm_et[map_info._IDX_HARVESTER] & enemy
-    if not harvesters:
-        return 0
-    adjacent = map_info.expand_manhattan(harvesters) & ~harvesters
-    free = (map_info._bm_seen
-            & ~map_info._bm_any_building
-            & ~map_info._bm_env[map_info._IDX_ENV_WALL]
-            & ~map_info._bm_friendly_bots
-            & ~map_info._bm_enemy_bots
-            & ~map_info._bm_enemy_turret_threat)
-    return adjacent & free
-
-
 def _open_enemy_line_ends() -> int:
     """Empty tiles an enemy conveyor is currently pouring into.
 
@@ -214,19 +187,6 @@ def score():
     my_pos = map_info._my_pos
     w = map_info._width
     my_bit = 1 << (map_info._my_pos.x + map_info._my_pos.y * w)
-
-    # Tap an enemy harvester first: cheapest swing per titanium in the bot.
-    if rc.get_global_resources() >= rc.get_conveyor_cost() + map_info.ti_reserve():
-        taps = _enemy_harvester_taps()
-        if taps:
-            mine = pathing.claim_subset(my_bit, map_info._bm_friendly_bots, taps, tie_self=True)
-            if mine:
-                best = min(map_info.iter_mask(mine),
-                           key=lambda p: (my_pos.distance_squared(p), p.x + p.y * w))
-                if my_pos.distance_squared(best) <= TAP_RANGE * TAP_RANGE:
-                    _cached_target = best
-                    _cached_kind = "tap"
-                    return TAP_SCORE
 
     # Steal the open end of an enemy conveyor line that reaches into our half.
     # Put *our* conveyor on it, pointed home: conveyors accept input from either
@@ -308,16 +268,7 @@ def run():
     adjacent = abs(target.x - my_pos.x) + abs(target.y - my_pos.y) == 1
 
     if adjacent:
-        if _cached_kind == "tap":
-            home = map_info._my_core
-            d = _toward(target, home) if home is not None else None
-            if d is not None and rc.can_build_conveyor(target, d) \
-                    and rc.get_global_resources() >= rc.get_conveyor_cost() + map_info.ti_reserve():
-                log(f"TAP: conveyor beside enemy harvester at {target}")
-                rc.build_conveyor(target, d)
-                map_info.update_at(target)
-                return
-        elif _cached_kind == "steal":
+        if _cached_kind == "steal":
             if rc.get_global_resources() >= rc.get_conveyor_cost() + map_info.ti_reserve():
                 home = map_info._my_core
                 d = _toward(target, home) if home is not None else None
