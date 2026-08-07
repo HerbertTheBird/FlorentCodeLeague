@@ -68,6 +68,11 @@ LINE_RANGE = 7
 # Only builders already this close to the enemy core take the cut job.
 CUT_RANGE = 8
 
+# Targets we stood next to and could not act on, and the round each becomes
+# eligible again.
+RETRY_COOLDOWN = 30
+_blocked_until: dict = {}
+
 _cached_target: Position | None = None
 _cached_kind = ""
 
@@ -219,11 +224,18 @@ def score():
 
     enemy_bm = map_info._bm_team[1 - map_info._my_team_idx]
     _protected = protected_upstream()
+    # A tile with a bot standing on it can be neither built on nor fired at, and
+    # the enemy is happy to leave one parked on its own feed tile. Without this
+    # the bot walks adjacent, finds every action illegal, and run() falls through
+    # to move_adjacent -- which is a no-op because it is already adjacent. score()
+    # then re-picks the same tile next turn, forever: replays show builders
+    # wedged this way for 400+ turns at a state that outranks the entire economy.
+    occupied = map_info._bm_friendly_bots | map_info._bm_enemy_bots
     seal = 0        # empty feed tiles we can wall off
     demolish = 0    # enemy conveyors feeding the core
     for tile in feed_tiles(core):
         bit = 1 << (tile.x + tile.y * w)
-        if map_info._bm_env[map_info._IDX_ENV_WALL] & bit:
+        if map_info._bm_env[map_info._IDX_ENV_WALL] & bit or bit & occupied:
             continue
         if map_info._bm_conveyors & enemy_bm & bit:
             if not (bit & _protected):
@@ -237,8 +249,12 @@ def score():
         mine = pathing.claim_subset(my_bit, map_info._bm_friendly_bots, claims, tie_self=True)
         if not mine:
             continue
-        best = min(map_info.iter_mask(mine),
-                   key=lambda p: (my_pos.distance_squared(p), p.x + p.y * w))
+        now = rc.get_current_round()
+        usable = [p for p in map_info.iter_mask(mine)
+                  if _blocked_until.get(p, -1) <= now]
+        if not usable:
+            continue
+        best = min(usable, key=lambda p: (my_pos.distance_squared(p), p.x + p.y * w))
         _cached_target = best
         _cached_kind = kind
         return CUT_SCORE
@@ -246,6 +262,7 @@ def score():
 
 
 def run():
+    global _blocked_until
     target = _cached_target
     my_pos = map_info._my_pos
     adjacent = abs(target.x - my_pos.x) + abs(target.y - my_pos.y) == 1
@@ -278,4 +295,10 @@ def run():
             log(f"CUT: demolishing enemy supply conveyor {target}")
             rc.fire(target)
             return
+    if adjacent:
+        # Standing next to the target with nothing legal to do. Moving is a
+        # no-op from here, so stand down for a while and let another state have
+        # the turn rather than re-picking this tile every round.
+        _blocked_until[target] = rc.get_current_round() + RETRY_COOLDOWN
+        return
     nav.move_adjacent(target)
