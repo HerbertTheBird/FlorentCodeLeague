@@ -1,5 +1,7 @@
 from fcode import *
 
+from main import has_op
+
 import map_info
 import pathing
 from pathing import Pathing
@@ -1025,7 +1027,7 @@ def _try_launcher_lockdown(target: Position) -> bool:
     where placing a launcher (or barrier) maximally increases the closest
     enemy bot's pathing distance to us. Tiebreak: barrier > launcher (cheaper).
     Skip placement if no candidate strictly increases the distance."""
-    if rc.get_action_cooldown() != 0:
+    if not has_op():
         return False
     ti_have = rc.get_global_resources()
     reserve = map_info.ti_reserve()
@@ -1165,8 +1167,7 @@ def _try_launcher_lockdown(target: Position) -> bool:
         map_info.update_at(best_p)
         built = True
 
-    if built:
-        # Build uses action cooldown; move cooldown is independent — keep advancing.
+    if built and has_op():
         nav.move_to(target)
         return True
     return False
