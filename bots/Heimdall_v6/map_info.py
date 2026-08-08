@@ -886,7 +886,10 @@ def update_at(pos: Position) -> None:
     target = None
     if is_conveyor[et_idx] and direction is not None:
         dx, dy = _DIRECTION_DELTAS_I[_DIR_INT[direction]]
-        target = Position(x + dx, y + dy)
+        tx = x + dx
+        ty = y + dy
+        if 0 <= tx < width and 0 <= ty < height:
+            target = Position(tx, ty)
 
     building_id[n] = entity_id
     building_et_idx[n] = et_idx
@@ -1299,14 +1302,11 @@ def _compute_route_targets() -> int:
         mask ^= lsb
         n = lsb.bit_length() - 1
         tn = conv_target[n]
-        # update_at stores conv_target without bounds-checking the target, so a
-        # conveyor on row 0 facing NORTH writes a negative index and this shift
-        # raises ValueError -- caught by main.Player.run, which costs that unit
-        # its ENTIRE turn for as long as the conveyor exists and is observed
-        # loaded. Probed reachable: can_build_conveyor(Position(2,0), NORTH)
-        # returns True and the build succeeds. _conv_output_mask already guards
-        # this exact value; so do both conv_target reads in this function (here
-        # and in the reaches_core walk below).
+        # Conveyors may legally face off the board (probed:
+        # can_build_conveyor(Position(2, 0), NORTH) succeeds), in which case
+        # update_at stores -1. Kept as a guard so a negative index can never
+        # reach the shift below -- that raises ValueError, which main.Player.run
+        # catches at the cost of the unit's ENTIRE turn.
         if tn < 0 or tn >= tiles:
             continue
         tbit = 1 << tn
