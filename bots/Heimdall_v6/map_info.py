@@ -56,15 +56,6 @@ _INT_DIR =  {i: t for i, t in enumerate(Direction)}
 _TM_INT =   {t: i for i, t in enumerate(Team)}
 _INT_TM =   {i: t for i, t in enumerate(Team)}
 
-# Claude gen'ed explanation:
-# Fast enum->int lists: index by id(enum)//16 & mask, but simpler:
-# use a list where list[enum_int_index] = int_index.  We build these
-# as identity since _ET_INT already maps enum->sequential int.
-# For the hot path we want:  et_idx = _ET_TO_IDX[et]  where et is the enum.
-# Python enums from cambc don't have a .value that's an int index, so we
-# keep the dict lookups for the initial et->et_idx conversion, but replace
-# all *subsequent* frozenset membership tests with bool-list indexing.
-
 # Pre-computed indices for fast list access
 _IDX_CONVEYOR          = _ET_INT[EntityType.CONVEYOR]
 _IDX_SPLITTER          = _ET_INT[EntityType.SPLITTER]

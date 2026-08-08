@@ -1,18 +1,7 @@
 def has_op() -> bool:
     """True iff this unit still has its single move-or-action for this turn.
-
-    Both cooldowns being zero is the only gate-aware check: a move sets only the
-    move cooldown and an action sets only the action cooldown, but doing either
-    blocks the other for the turn. (can_act() alone misses the move case.)
-
-    Reads the controller from `map_info._rc`, NOT a main-level global: the engine
-    can load this file under a different module name than the `main` that other
-    modules import has_op from, so a main-level global would not be shared. But
-    `import map_info` is absolute + cached, so map_info is the same module
-    everywhere; its `_rc` is set in map_info.init() and stable across turns.
-    (map_info is bound by the `import map_info` below before any runtime call;
-    has_op is still defined here at the top so other modules can import it
-    without a circular-import failure.)"""
+    Despite being separate cooldowns, both need to be zero for the unit to
+    be able to move or make an action."""
     return map_info._rc.get_action_cooldown() == 0 and map_info._rc.get_move_cooldown() == 0
 
 

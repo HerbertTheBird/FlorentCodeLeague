@@ -48,14 +48,6 @@ nav: Pathing = None
 _cost_map: dict[int, tuple[int, int]] = {}  # tile index -> (min titanium cost, round recorded)
 COST_MAP_TTL = 100
 
-# A failed conveyor path is a snapshot of this turn's conditions, not a property
-# of the tile: routing `avoid` (map_info.get_avoid(True)) drops enemy turret
-# threat, every conveyor, and our own conveyors' output tiles, all of which move
-# turn to turn. This used to be a plain bitmask that was only ever OR'd into and
-# never cleared, so one miss -- a gunner covering the lane for three turns, a
-# teammate closing the corridor -- blacklisted the tile for the rest of the game
-# for this bot, and the `nav.closest` miss below blacklisted the whole candidate
-# set at once. Expire entries the way _cost_map already does.
 UNPATHABLE_TTL = 40
 _unpathable: dict[int, int] = {}   # tile index -> round recorded
 
@@ -152,12 +144,14 @@ def _orphan_harvesters(not_blocked_mask: int):
     if not my_harvesters:
         return 0
     return my_harvesters & not_blocked_mask
+
 def cant_claim():
     w = map_info._width
     my_pos = map_info._my_pos
     my_bit = 1 << (my_pos.x + my_pos.y * w)
     cant = map_info._bm_others_3x3 & ~map_info.expand_chebyshev(my_bit)
     return cant
+
 def _my_claims():
     w = map_info._width
     my_mask = 1 << (map_info._my_pos.x + map_info._my_pos.y * w)

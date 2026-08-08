@@ -32,7 +32,7 @@ states = tuple(sorted(
     reverse=True
 ))
 
-# Harvvest zones are calculated based on map symmetry with fallback
+# Harvest zones are calculated based on map symmetry with fallback
 harvest_radius = 0
 _harvest_zone = 0
 _harvest_zone_final = False

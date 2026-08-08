@@ -1,7 +1,7 @@
 """Global-store map sharing.
 
-Markers are gone, so units pool map knowledge through the 16-slot per-team
-communication store (`read_store`/`write_store`; each slot is a u32 = 32 bits).
+Units pool map knowledge through the 16-slot per-team communication store 
+(`read_store`/`write_store`; each slot is a u32 = 32 bits).
 
 Ownership: one writer per slot at a time.
     slot 0        -> the core
