@@ -13,11 +13,19 @@ land before turn 250.
 Pick opponents for what you are testing: only Khaos fields sentinels, so a
 turret-matchup change is invisible in a pool of loki/Hermod/Heimdall_v3."""
 import json, subprocess, sys, pathlib, collections, concurrent.futures as cf
-bot = sys.argv[1]; opps = sys.argv[2].split(","); outp = sys.argv[3]
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import botpath
+if len(sys.argv) < 3:
+    print(__doc__.strip(), file=sys.stderr)
+    raise SystemExit(2)
+bot = sys.argv[1]
+opps = sys.argv[2].split(",")
+outp = sys.argv[3] if len(sys.argv) > 3 else "wide_benchmark.json"
 maps = sorted(p.stem for p in pathlib.Path("maps").glob("*.map26"))
 def one(a):
     opp, mp, side = a
-    x, y = (f"bots/{bot}", f"bots/{opp}") if side=="A" else (f"bots/{opp}", f"bots/{bot}")
+    b, o = str(botpath.resolve(bot)), str(botpath.resolve(opp))
+    x, y = (b, o) if side=="A" else (o, b)
     r = subprocess.run(["fcode","run",x,y,f"maps/{mp}.map26","--seed","1","--tle","5000",
                         "--replay","/dev/null","--json"], capture_output=True, text=True)
     ln = next((l for l in reversed(r.stdout.splitlines()) if l.startswith("{")), None)
