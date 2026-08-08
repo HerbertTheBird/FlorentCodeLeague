@@ -174,20 +174,20 @@ def run():
         if is_mine and rc.can_destroy(best_ore) and has_op():
             rc.destroy(best_ore)
             map_info.update_at(best_ore)
-    targets = set()
-    log(path[0])
-    for d in Direction:
-        p = map_info.pos_add(path[0], d)
-        if p == best_ore or not map_info.in_bounds(p):
-            continue
-        if p.distance_squared(best_ore) > 1:
-            continue
-        if map_info.is_passable(p):
-            targets.add(p)
-    if targets:
-        nav.move_to(targets)
-    log("targets", targets, path[0])
-    # Move to any adjacent tile and build harvester
+
     if rc.can_build_harvester(best_ore) and rc.get_global_resources() >= rc.get_harvester_cost() + map_info.ti_reserve():
-        rc.build_harvester(best_ore)
-        map_info.update_at(best_ore)
+        p0 = path[0]
+        # Make sure we don't block ourselves off from the start of the path
+        _, reach = nav.closest(1 << (p0.x + p0.y * w),
+                               avoid=map_info.get_avoid(False) | ore_bit,
+                               side=False)
+        if reach != -1:
+            log("harvest: building at", best_ore)
+            rc.build_harvester(best_ore)
+            map_info.update_at(best_ore)
+            return
+        log("harvest: wrong side of", best_ore, "- crossing to", p0)
+        nav.move_to(p0)
+        return
+
+    nav.move_adjacent(best_ore)
