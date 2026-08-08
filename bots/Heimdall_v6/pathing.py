@@ -680,14 +680,17 @@ class Pathing:
                 return None
         else:
             start_mask = 1 << (start.x + start.y * w)
+    
         result = self.bfs_route(start_mask, target, avoid, end_cost_mask=end_cost_mask)
         if result is None:
             return None
-        s_pos, p_pos, dist = result
+        
         if DRAW_DEBUG:
+            s_pos, p_pos, _ = result
             self.rc.draw_indicator_line(s_pos, p_pos, 255, 0, 255)
             self.rc.draw_indicator_dot(s_pos, 255, 0, 255)
-        return (s_pos, p_pos, dist)
+
+        return result
 
     def calculate_conveyor_path(self, start: Position, update: bool = False):
         log("conveyors from ", start)
