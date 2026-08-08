@@ -50,6 +50,12 @@ DEFAULT_SUITE = ("Ladder_v36", "loki", "Khaos", "Hermod", "Heimdall_v3")
 # several points against them while losing unrated matches against real teams.
 # The weighted line is the one to read; the flat one is kept as a regression
 # check. Nothing here beats an actual UR against a top team.
+# Pick the opponent for what you are testing. Champion_vN head-to-head answers
+# "does this beat what we ship", but it is BLIND to anything neither side does.
+# Sentinels are the known case: Khaos fields 4 a game, while loki, Hermod,
+# Heimdall_v3 and our own bot all build ~0, so a sentinel-targeting change
+# measured in self-play ranked two variants in the exact opposite order to the
+# same change measured against Khaos. Use --bots X Khaos for turret-matchup work.
 SUITE_WEIGHTS = {"Ladder_v36": 4.0}
 DEFAULT_WEIGHT = 1.0
 

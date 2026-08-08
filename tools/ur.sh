@@ -14,7 +14,10 @@ SPORKS=57175ea4-e87f-44ed-a8c4-d5ee8ba31ecd
 PIVOT=20064efa-c6a9-4c46-acb7-3f7ea9f9b1c9
 ADGATO=fb0e7053-f8f3-4cc8-a38f-1856a518c7d2
 JYTHON=8cf9b751-00d3-484a-b0ed-e3073ae1d46f
-LAZY=648d1d5b-5443-4257-a0aa-7048661b612d
+# team lazy dropped from the batch: we beat them 100% and the slot was
+# wasted. Lorem Ipsum replaces it -- lower rated but we keep losing to them,
+# which is exactly the signal a batch should be spending a slot on.
+LOREM=017419af-711a-40b0-9826-60cc754bd840
 
 SETS=(
   "antler jackpot saga heart moonrise"
@@ -31,6 +34,6 @@ fi
 MAPS=()
 for m in ${=SETS[$((IDX + 1))]}; do MAPS+=(--map $m); done
 print "map set $IDX: ${=SETS[$((IDX + 1))]}"
-for id in $SPORKS $PIVOT $ADGATO $JYTHON $LAZY; do
+for id in $SPORKS $PIVOT $ADGATO $JYTHON $LOREM; do
   fcode match unrated $id $MAPS 2>&1 | tail -1
 done
