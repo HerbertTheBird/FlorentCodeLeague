@@ -128,6 +128,36 @@ behaviour change like any other and has to earn its place on the scoreboard.
     route above the rush                  50.0%   rejected
     out-of-zone enemy-builder chase off   48.5%   rejected
 
+--- the turret-siting lever is spent ----------------------------------------
+
+Raising MIN_ATTACK_SCORE 16 -> 28 in v51 was worth ~7 points on both
+instruments and cut early core deaths from 59 of 90 losses to 38 of 73, with
+titanium-collected losses rising 12 -> 16: exactly the intended trade, fewer
+games thrown away in the first two minutes at the cost of a few more long ones.
+
+Everything else tried in the same area since has come back neutral or worse
+(vs Khaos, 78.8% baseline / vs the then-current bot):
+
+    SENTINEL core weight 16 -> 128        77.3% / 47.0%
+    THREAT_PENALTY 4 -> 8                 78.8% / 43.9%
+    THREAT_PENALTY 4 -> 16                  --   / 47.0%
+    SCORE_THRESHOLD_FACTOR 0.15/0.40/0.60 80.3 / 78.8 / 74.2%
+    no turrets before round 30            72.7% / 47.0%
+    cap of 2 turrets before round 60      71.2% / 53.0%
+    remembered out-of-vision besiegers    74.2% / 47.0%
+
+The last one is worth a note because the diagnosis was right and the fix still
+lost. core_besiegers() asks rc.get_nearby_buildings(), which for a builder is
+vision radius^2 20 (~4.5 tiles), while a sentinel shoots 5 -- so a sentinel can
+siege our core from a tile no builder near it can see, and on antler against
+Lorem Ipsum exactly that killed us at turn 65 while we never registered a siege.
+Deriving besiegers from remembered map state instead fixes the blindness and
+scores 74.2% / 47.0%, because what it then does -- send a builder to chip a
+40 HP sentinel at 2 damage a turn -- is worse than ignoring it. Barriers cannot
+screen a sentinel (screen_tiles returns [] for them), so seeing it only helps if
+we can answer it, and we cannot. The answer would have to be outhealing: three
+builders repairing the core is 12 HP a round against a sentinel's 9.
+
 --- measuring against two opponents at once ---------------------------------
 
 Since v51 every candidate is measured twice: self-play against the current
