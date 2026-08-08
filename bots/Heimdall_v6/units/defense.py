@@ -128,6 +128,43 @@ behaviour change like any other and has to earn its place on the scoreboard.
     route above the rush                  50.0%   rejected
     out-of-zone enemy-builder chase off   48.5%   rejected
 
+--- v48/v49, from debugging a 1-4 ladder loss to Erebus (rank #7) ------------
+
+Against Champion_v47:
+
+    gunner stops targeting sentinels            56.1%   ADOPTED (v48)
+    let the core into the tier-0 heal pool      53.0%   ADOPTED (v48)
+    both together                               57.6%
+    sentinels start targeting turrets           48.5%   rejected
+    THREAT_PENALTY 4 -> 16 (site gunners safe)  47.0%   rejected
+
+The gunner/sentinel pair is worth reading together. Sentinels cannot rotate --
+there is a GUNNER_ROTATE_COST and no sentinel equivalent -- so a gunner placed
+off a sentinel's fixed 5-tile firing line does beat it, for 10 Ti less and
+without taking a shot. That is a real tactic and the threat mask already models
+sentinel facing exactly, so the safe tiles are known. But pushing placement
+toward them lost 3 points while simply declining the fight won 6. The scorer is
+not yet good enough to exploit the fixed facing; when it is, revisit this.
+
+Against Champion_v48:
+
+    route/cut/shift correctness patches         56.1%   ADOPTED (v49)
+    reachability bans expire after 30 rounds    51.5%   rejected here
+    TI_RESERVE_CAP 40 -> 0                      51.5%   rejected here
+    all of the above bundled                    43.9%   rejected
+
+Note the last line. Each part is at or above even alone and the bundle loses 6
+points -- the mirror image of the v44 result where four parts averaging 57%
+combined to 71%. Interaction cuts both ways, and bundles have to be measured.
+
+The reachability-ban fix deserves a second look on a later base. It is the same
+defect and the same fix that was worth 56.1% in `cut` in v44: harvest and route
+both OR into a permanent ban mask on conditions that are transient, and an
+instrumented run shows 692 builder-turns on saga spent with no claims at all
+while holding a banned tile that would route successfully right now. It measures
+52.5% pooled over 198 matches and 51.5% here -- consistently positive, never
+enough to carry on its own.
+
 The defence constants were re-swept after the economy changed, against
 Champion_v45:
 

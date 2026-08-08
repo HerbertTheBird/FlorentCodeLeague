@@ -66,7 +66,13 @@ TAP_RANGE = 8
 # they lose the output into a dead end, and none of it reaches us. Cap the gap so
 # every tap we pay for is one route can plausibly close.
 TAP_MAX_GAP = 4
-MAX_SCORE = TAP_SCORE
+# CUT_SCORE is 13 and TAP_SCORE is 12, so declaring TAP_SCORE here understated
+# what score() can actually return. Inert today only because defense.ENABLED is
+# False collapses defend.score() to {SIEGE_SCORE, 0} and nothing else declares
+# 12 -- but re-enable the block/trap family and defend returning BLOCK_SCORE=12
+# would stop cut being *scored at all* on exactly the turns it would have
+# returned 13, which is the premise this whole module rests on.
+MAX_SCORE = CUT_SCORE
 
 # How far a builder will travel to contest an enemy line end.
 LINE_RANGE = 7

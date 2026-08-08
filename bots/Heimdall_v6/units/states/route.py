@@ -109,7 +109,13 @@ def not_blocked():
     return map_info._board_mask & ~already_routed & ~blocked & ~map_info._bm_enemy_turret_threat
 
 def _orphan_harvesters(not_blocked_mask: int):
-    my_harvesters = map_info._bm_et[map_info._IDX_HARVESTER]
+    # Was unmasked by team, so ENEMY harvesters entered route's candidate set --
+    # and route (5) outranks harvest (4), heal (3), disrupt (2) and explore (1),
+    # so every such turn outranked our own economy. Measured against loki: enemy
+    # harvesters present in the mask on 528/614/753 builder-turns on
+    # saga/jackpot/hive, and actually selected as the build target 11-15 times
+    # a game.
+    my_harvesters = map_info._bm_et[map_info._IDX_HARVESTER] & map_info._bm_team[map_info._my_team_idx]
     if not my_harvesters:
         return 0
     return my_harvesters & not_blocked_mask

@@ -1298,6 +1298,15 @@ def _compute_route_targets() -> int:
         lsb = mask & -mask
         n = lsb.bit_length() - 1
         tn = conv_target[n]
+        # update_at stores conv_target without bounds-checking the target, so a
+        # conveyor on row 0 facing NORTH writes a negative index and this shift
+        # raises ValueError -- caught by main.Player.run, which costs that unit
+        # its ENTIRE turn for as long as the conveyor exists and is observed
+        # loaded. Probed reachable: can_build_conveyor(Position(2,0), NORTH)
+        # returns True and the build succeeds. _conv_output_mask already guards
+        # this exact value; these two call sites did not.
+        if tn < 0 or tn >= _width * _height:
+            continue
         tbit = 1 << tn
         if hard_block & tbit:
             dead_ends |= lsb
