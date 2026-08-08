@@ -635,6 +635,24 @@ def get_best_direction(pos):
             best_g_score = s
             best_g_dir = directions[d]
 
+    # Sentinel wins ties here, and that is probably wrong on cost: a gunner is
+    # 20 base against 30, and both add +20 to the global cost scale, so a gunner
+    # scoring as well as a sentinel on the same tile is the cheaper buy.
+    #
+    # Measured, and the answer depends entirely on which opponent you ask --
+    # which is the finding worth keeping. Against Khaos, the ONLY local bot that
+    # fields sentinels (4 a game; loki, Hermod and Heimdall_v3 all build zero,
+    # and so do we), against a 72.7% baseline:
+    #
+    #     always take the gunner where placeable   66.7%   clearly worse
+    #     gunner wins ties                         74.2%   +1 game, noise
+    #
+    # In self-play against Champion_v49 the ranking INVERTS -- 54.5% and 48.5%
+    # respectively. Self-play cannot see this change, because neither side
+    # builds the piece it is about. Anything touching sentinel logic has to be
+    # measured against Khaos or on the ladder; the head-to-head number is blind
+    # to it. Left unchanged: forcing the gunner overshoots and the tie-break
+    # version is within noise on the only instrument that can see it.
     if best_g_score < 0 or best_s_score >= best_g_score:
         return best_s_dir, EntityType.SENTINEL, best_s_score
     return best_g_dir, EntityType.GUNNER, best_g_score
