@@ -61,7 +61,18 @@ GUNNER_BUILDING_SCORE = [0] * map_info._NUM_ET
 GUNNER_BUILDING_SCORE[map_info._IDX_CORE] = 128 #duplicate value
 GUNNER_BUILDING_SCORE[map_info._IDX_HARVESTER] = 60
 GUNNER_BUILDING_SCORE[map_info._IDX_GUNNER] = 100
-GUNNER_BUILDING_SCORE[map_info._IDX_SENTINEL] = 100
+# Measured 57.6% against Champion_v47 as the sole change; keeping it at 100 and
+# instead making placement prefer safe tiles measured 47.0%.
+#
+# The mechanics say a gunner CAN beat a sentinel: sentinels cannot rotate (there
+# is a GUNNER_ROTATE_COST and no sentinel equivalent), so their threat is a fixed
+# 5-tile line, and a gunner sited off it kills them for 10 Ti less and takes
+# nothing back. The scorer just does not reliably find those tiles -- raising
+# THREAT_PENALTY from 4 to 16 to push it there lost 3 points. Until placement is
+# good enough to exploit the fixed facing, aiming gunners at sentinels is a
+# losing trade: outranged 3 to 5, and dead in two 18-damage shots against the six
+# 7-damage shots it needs to answer.
+GUNNER_BUILDING_SCORE[map_info._IDX_SENTINEL] = 20
 GUNNER_BUILDING_SCORE[map_info._IDX_LAUNCHER] = 14
 GUNNER_BUILDING_SCORE[map_info._IDX_CONVEYOR] = 30
 GUNNER_BUILDING_SCORE[map_info._IDX_BARRIER] = 14

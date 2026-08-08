@@ -237,7 +237,31 @@ def _very_damaged_targets():
     """Bitmask of friendly buildings with > 2 damage, plus any friendly sentinel
     locked in a mutual-shot exchange with an enemy sentinel."""
     base = _healable_mask() & map_info._bm_very_damaged & ~map_info._bm_my_core_area & map_info._bm_visible
-    return base | (_mutual_sentinel_threat() & map_info._bm_visible)
+    return base | (_mutual_sentinel_threat() & map_info._bm_visible) | _hurt_core()
+
+
+# The core is masked out of the tier-0 pool above, so a conveyor missing 3 HP
+# outranks a core missing 300 for every builder standing next to both. Measured:
+# on twins exactly 1 of 102 heals landed on the core, and on fjord we died at
+# turn 65 having healed nothing at all. Repair is 4 HP for 1 titanium, so
+# restoring a 500 HP core costs ~125 Ti -- the cheapest survivability in the
+# game, on the one building whose loss ends the match. After a siege is broken
+# the core is usually the only thing still badly hurt and nothing goes back in.
+#
+# Worth 3 points on its own (53.0% vs Champion_v47).
+CORE_HEAL_MISSING = 60
+
+def _hurt_core() -> int:
+    core = map_info._bm_my_core_area & map_info._bm_damaged & map_info._bm_visible
+    if not core:
+        return 0
+    w = map_info._width
+    full = map_info._MAX_HP_BY_IDX[map_info._IDX_CORE]
+    for p in map_info.iter_mask(core):
+        n = p.x + p.y * w
+        if map_info._building_et_idx[n] == map_info._IDX_CORE and full - map_info._building_hp[n] >= CORE_HEAL_MISSING:
+            return core
+    return 0
 
 
 def _heal_targets():
