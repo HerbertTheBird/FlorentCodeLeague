@@ -147,8 +147,19 @@ matching the gunner). Measured:
     early forward sentinel 65.2%       36.4%       78.8%
 
 Fifteen points in self-play, slightly up against the rusher, and dead level
-against Khaos -- wins on one instrument and regresses on neither, which is the
-profile nothing else this session has managed.
+against Khaos -- wins on one instrument, regresses on neither.
+
+SHIPPED AS v54 AND REVERTED: it regressed on the ladder and v51 was reactivated.
+So the local profile above, on the best three-instrument evidence available,
+still did not survive contact. The likely reason is the one thing none of the
+three instruments punishes: we already build far more turrets than the teams
+above us (26 gunners to sporks' 10 in one instrumented game), and opening the
+core gate from turn 1 buys yet more of them. Self-play cannot see that, because
+both sides overbuild equally.
+
+Read together with the MIN_ATTACK_SCORE result -- where building FEWER, better
+turrets was worth 7 points -- the direction that pays is fewer turrets, not
+earlier ones. Treat "spawn more turrets sooner" as closed.
 
 Note the SENTINEL core weight ALONE was measured earlier at 77.3% / 47.0% and
 rejected. It only pays once the gate is open: scoring the enemy core highly is

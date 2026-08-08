@@ -46,7 +46,7 @@ def init(c: Controller):
 
 
 SENTINEL_BUILDING_SCORE = [0] * map_info._NUM_ET
-SENTINEL_BUILDING_SCORE[map_info._IDX_CORE] = 128 #duplicate value
+SENTINEL_BUILDING_SCORE[map_info._IDX_CORE] = 16 #duplicate value
 SENTINEL_BUILDING_SCORE[map_info._IDX_HARVESTER] = 40
 SENTINEL_BUILDING_SCORE[map_info._IDX_GUNNER] = 20
 SENTINEL_BUILDING_SCORE[map_info._IDX_SENTINEL] = 20
@@ -948,16 +948,8 @@ MAX_SCORE = 9
 # backstop for the showdown case: a game where we still have no economy and no
 # reported route by turn 150 is one we are losing on titanium anyway, and
 # pressure on their core beats a fifth turret aimed at a conveyor.
-# Submitting our Rusher instrument as an unrated bot produced the single most
-# interesting result of the session: it BEAT SPORKS 3-2 while losing 0-5 to
-# Lorem Ipsum, 0-5 to Erebus and 1-4 to both Pivot and Jython -- 5-20 overall.
-# The rank-1 bot is specifically weak to an early forward sentinel, and it opens
-# against us the same way. A pure rush is unviable against the rest of the
-# field, so this takes only the piece that beat them: let a sentinel value the
-# enemy core from turn 1 instead of waiting on the siege gate, on top of our
-# normal economy.
-SIEGE_OPEN_ROUND = 0
-SIEGE_MIN_HARVESTERS = 0
+SIEGE_OPEN_ROUND = 150
+SIEGE_MIN_HARVESTERS = 2
 
 def score():
     global _SENT_CORE_BITS, _GUN_CORE_BITS_BY_STEP
@@ -968,7 +960,7 @@ def score():
         SENTINEL_BUILDING_SCORE[core] = 0
         GUNNER_BUILDING_SCORE[core] = 0
     else:
-        SENTINEL_BUILDING_SCORE[core] = 128
+        SENTINEL_BUILDING_SCORE[core] = 16
         GUNNER_BUILDING_SCORE[core] = 128
     # The hot scorers read the precomputed bit forms (_SENT_CORE_BITS /
     # _GUN_CORE_BITS_BY_STEP), not the score lists, so re-derive them here or the
