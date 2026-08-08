@@ -91,7 +91,7 @@ def _find_chase_target(damaged: bool = True):
 
     filtered = enemy_bots
     # Expand the enemy zone once and pre-filter the friendlies we iterate.
-    # A friendly outside enemy_zone_4 has no enemy within 4 chebyshev, so
+    # A friendly outside enemy_zone_4 has no enemy within 4 manhattan, so
     # the per-friendly expansion below would be a no-op.
     enemy_zone_4 = map_info.expand_manhattan(enemy_bots, 4)
     mask = friendly_bots & ~my_bit & map_info._bm_visible & enemy_zone_4
