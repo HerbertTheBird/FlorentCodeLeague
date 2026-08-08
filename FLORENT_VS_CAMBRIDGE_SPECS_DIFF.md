@@ -5,7 +5,7 @@ runtime behavior all agree for Florent (see "Engine vs. rules" below), so this i
 comparison.
 
 ## Sources
-- **Cambridge** `[cam]` — `llms-full.txt`, a full export of `docs.battlecode.cam` (`from cambc
+- **Cambridge** `[cam]` — `CAMBRIDGE_SPECS.md`, a full export of `docs.battlecode.cam` (`from cambc
   import`, `MAX_TURNS = 2000`). Complete & authoritative.
 - **Florent** `[flo]` — the public docs at **`game.code.florent.vc/docs`** (`/game-rules-reference`,
   `/api-types`, `/game-rules-overview`), cross-checked against the **`fcode 2.3.3` engine** (probed
@@ -79,11 +79,14 @@ sentinel **refined-Ax stun (+5 cd)**, and the whole refining chain.
 - **Core — 3×3 → 2×2.** Cambridge: 9 tiles, `get_position()`=centre. Florent: 2×2, spawn radius² 2.
   Core `convert` changes meaning: Cambridge refined-**Ax→Ti** (1:4); Florent **Ti→ammo** (1:1).
 - **Comms — markers → store.** Cambridge: one u32 marker/round (a MARKER entity on the map).
-  Florent: **16 int slots (0–15)**, per-team, buffered one round (*not visible until next round,
-  even to the writer*).
+  Florent: **16 int slots (0–15)**, per-team, buffered one round. NOTE: comms are *not visible until 
+  next round, even to the writer*. If a bot writes to comms, no other bot will see until the following
+  turn.
 - **Length / maps / results:** rounds 2000 → **1000**; maps 20–50 → **8–30**; tiebreakers drop the
   two axionite tiers (ti collected → harvesters → ti stored → coinflip). Both end on core
   destroyed / resign first, best-of-5.
+- **Cooldown:** Even though we retain separate action and move cooldowns, both must be 0 for a builder
+  bot to move or act. Hence, we cannot do both on the same turn.
 
 ---
 
@@ -129,6 +132,6 @@ sentinel **refined-Ax stun (+5 cd)**, and the whole refining chain.
 
 ---
 
-*`[cam]` from `llms-full.txt`; `[flo]` from `game.code.florent.vc/docs` cross-checked against the
+*`[cam]` from `CAMBRIDGE_SPECS.md`; `[flo]` from `game.code.florent.vc/docs` cross-checked against the
 `fcode 2.3.3` engine (runtime-probed). Supersedes the earlier three-way split — the engine now
 tracks the published rules, so "site" and "engine" are one and the same for Florent.*

@@ -258,28 +258,24 @@ def _count_nearby_allies(core_pos: Position, my_team) -> int:
 
 def run():
     global _spawn_plan, _spawn_tiles
-    # if rc.get_current_round() == 200:
 
-    #     rc.resign()
-    # Sync round info
     map_info.update()
-    comms.read()          # absorb every slot's shared tiles/symmetry, broadcast our own
-    alarm = comms.read_alarm()   # ages slot 15 by round number, so calling it
-                                 # more than once a turn is harmless
+    comms.read()    # absorb every slot's shared tiles/symmetry, broadcast our own
+    alarm = comms.read_alarm()
+
     comms.write()
     map_info.recompute_derived()
     for i in map_info.iter_mask(map_info._bm_env[map_info._IDX_ENV_WALL]):
         rc.draw_indicator_dot(i, 255, 255, 255)
-    # The core's footprint never moves; compute the surrounding spawn ring once
-    # _my_core is known (after the first observation).
+
     if not _spawn_tiles:
         _spawn_tiles = _compute_spawn_tiles()
+
     titanium = rc.get_global_resources()
     scaling = rc.get_scale_percent()
     core_pos = map_info._my_pos
     my_team = map_info._my_team
     
-    # Initialize spawn plan
     if _spawn_plan is None:
         _spawn_plan = choose_spawn_plan(rc, core_pos, INITIAL_SPAWN_COUNT)
     if rc.get_current_round() <= INITIAL_SPAWN_COUNT + INITIAL_EXPLORE_MAX_STEPS:
@@ -335,6 +331,11 @@ def run():
                 # First spawn according to initial plan, then spawn toward center
                 if not _spawn_toward_plan(core_pos):
                     _spawn_toward_center()
-    ammo_amount = min(min(50, rc.get_global_resources()-2), rc.get_current_round() * 2) - rc.get_global_ammo()
+
+    # Ammount of ammo we want to have
+    target_ammo_ammount = min(min(50, rc.get_global_resources()-2), rc.get_current_round() * 2)
+
+    # Convert titanium into ammo if we want more
+    ammo_amount = target_ammo_ammount - rc.get_global_ammo()
     if ammo_amount > 0 and rc.can_convert_ammo(ammo_amount):
         rc.convert_ammo(ammo_amount)

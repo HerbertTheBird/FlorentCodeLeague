@@ -113,7 +113,7 @@ CORE_MAX_HP = 500
 # cross-referencing max HP against GameConstants and, for the three kinds that
 # share 30 HP, by whether the tile is ore (harvester) and which side built it.
 #
-# Note the real constants are not the ones in llms-full.txt: a gunner is 25 HP
+# Note the real constants are not the ones in CAMBRIDGE_SPECS.md: a gunner is 25 HP
 # and a sentinel 40, the reverse of what the Cambridge docs say.
 PAYLOAD_KIND = {
     10: "builder",     # 40 hp, the only mobile kind

@@ -35,6 +35,8 @@ Claims go through `pathing.claim_subset`, the same Voronoi partition the other
 states use, so exactly one builder takes each block tile without any comms.
 """
 
+from main import has_op
+
 import map_info
 import pathing
 import units.builder
@@ -491,7 +493,7 @@ def _try_seal_flanks(my_pos: Position) -> bool:
     never has to mirror again: the enemy can step sideways all it likes and its
     forward tile stays a barrier.
     """
-    if _target_axis is None or rc.get_action_cooldown() != 0:
+    if _target_axis is None or not has_op():
         return False
     if not defense.may_wall():
         return False
@@ -545,7 +547,7 @@ def _try_seal(enemy: Position, block: Position, my_pos: Position) -> bool:
     Sealing deliberately ignores `ti_reserve()`. A barrier is 3 Ti and a trapped
     enemy builder is worth vastly more than holding 40 Ti back for a spawn.
     """
-    if rc.get_action_cooldown() != 0 or not defense.may_wall():
+    if not has_op() or not defense.may_wall():
         return False
     if rc.get_global_resources() < rc.get_barrier_cost():
         return False

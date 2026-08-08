@@ -12,11 +12,6 @@ CARD_DIR = [
     Direction.WEST,
 ]
 
-# Extra BFS layers charged for crossing our own barriers / threatened tiles.
-# NOTE: these are not purely preference weights — bfs_move sizes its bucket
-# queue as `barrier_cost + threat_cost + 2` (see `cycle_len`), which is both the
-# frontier list length and the number of empty layers scanned before declaring a
-# miss. Raising either widens the worst-case per-turn scan.
 barrier_cost = 15
 threat_cost = 12
 conveyor_end_cost = 2
@@ -52,10 +47,7 @@ def voronoi_claim(my_mask, others_mask, claims, passable=None):
     all_claimed = my_claimed | other_front
     remaining_claims = claims & ~all_claimed
 
-    # Inlined expand_manhattan (4-neighbour — movement is cardinal-only) — saves
-    # ~1us function-call overhead per expand, and there can be many per call.
-    # The `& board` the helper applies is redundant here: `passable` is already a
-    # subset of the board, so it clamps any bit shifted off an edge.
+    # Inlined expand_manhattan (4-neighbour — movement is cardinal-only)
     w = map_info._width
     nlc = map_info._not_left_col
     nrc = map_info._not_right_col
@@ -173,8 +165,6 @@ def claim_subset(
     return claims & ~others_first_other_zone & ~others_mask
 
 class Pathing:
-
-
     width = height = 0
     rc: Controller
 
@@ -185,8 +175,6 @@ class Pathing:
 
     last_dir = None
     last_last_dir = None
-
-
 
 
     def _coerce_start(self, pos) -> int:
@@ -610,8 +598,7 @@ class Pathing:
         else:
             target_set = target
         avoid = map_info.get_avoid(False)
-        # if avoid_empty:
-        #     avoid |= map_info._bm_seen & ~map_info._bm_any_building & ~map_info._bm_env[map_info._IDX_ENV_WALL]
+
         my_pos = map_info._my_pos
         targets_not_adjacent = True
         if my_pos in target_set:
@@ -620,11 +607,6 @@ class Pathing:
             my_x = my_pos.x
             my_y = my_pos.y
             for t in target_set:
-                # Manhattan, not Chebyshev: movement is cardinal-only, so a
-                # diagonally-adjacent target is still two moves away and we are
-                # not "there yet". Using Chebyshev here suppressed the stuck
-                # counter for exactly the wedged-against-the-goal case the
-                # escape below exists to break.
                 if abs(my_x - t.x) + abs(my_y - t.y) <= 1:
                     targets_not_adjacent = False
                     break
@@ -635,10 +617,6 @@ class Pathing:
             self.stuck_turns = 0
             self.target_p = target_set
         if self.stuck_turns > 2 + self.rc.get_id() % 8:
-            # Go through self.move: it gates on has_op() (acting and moving are
-            # mutually exclusive per round, and can_move only checks the move
-            # cooldown), rejects tiles held by another builder, and keeps
-            # last_dir/last_last_dir in sync.
             for d in CARD_DIR:
                 if self.move(d):
                     return True

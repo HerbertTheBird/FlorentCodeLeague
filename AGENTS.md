@@ -1,3 +1,9 @@
+# Other Resources
+
+Reference CAMBRIDGE_SPECS.md and FLORENT_VS_CAMBRIDGE_SPECS_DIFF.md only if necessary. Our bot was originally
+ported from Cambridge Battlecode, so if the task deals with potential porting issues or differences in game
+logic, these resources might be helpful. Otherwise, do not bloat your context by reading them.
+
 # What this game is
 
 Two teams each control a fleet of robots on a rectangular grid (8x8 to 30x30, symmetric by reflection or rotation). A competitor writes a single Python class:

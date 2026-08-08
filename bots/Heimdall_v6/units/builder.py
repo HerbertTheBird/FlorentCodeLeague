@@ -209,17 +209,5 @@ def run():
     best_state = select_best_state()
     best_state.run()
 
-
-
-    # A builder holding a block tile must keep its turn free to mirror the enemy
-    # next round; spending it on an opportunistic attack or heal would let the
-    # enemy step around us. defend.run() does its own gated attack instead.
-    if best_state is defend and defend._cached_block is not None:
-        comms.write()
-        return
-
-    # (Khaos looped over cardinal neighbours here firing at enemy builder bots.
-    # That is dead code in Florent: fire() only damages the building on the
-    # target tile, so can_fire on a bot-only tile is always False.)
     heal._do_best_heal()
     comms.write()

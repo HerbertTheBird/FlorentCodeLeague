@@ -1,4 +1,10 @@
-# Game Constants
+# Disclaimer
+
+We are competing in Florent Battlecode. The following guide is for *Cambridge Battlecode*, a similar
+competition but with its own distinct ruleset. Do NOT use this guide alone as a source of truth;
+reference FLORENT_VS_CAMBRIDGE_SPECS_DIFF.md to see how Florent differs from the following guide.
+
+# Constants
 Source: https://docs.battlecode.cam/api/constants
 
 All numeric constants available via GameConstants.
