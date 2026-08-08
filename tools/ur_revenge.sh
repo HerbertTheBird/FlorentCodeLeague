@@ -18,7 +18,16 @@ EREBUS_MAPS=(--map drumlin --map atoll --map antler --map snowflake --map archip
 # go 0-for: lighthouse 0-3, antler 0-2, moonrise 1-6.
 SPORKS_MAPS=(--map lighthouse --map antler --map moonrise --map hive --map jackpot)
 
+# Every match queued here goes into .ur_revenge_ids so tools/ur_summary.py can
+# hold them out of the headline per-version record. These are deliberately the
+# maps we already lost on, so a version tested against them is being charged for
+# games no earlier version ever played -- mixing them into the pool makes a new
+# submission look like a regression purely because it was the one measured
+# honestly. Keep them, report them separately.
+IDS=.ur_revenge_ids
 print "revenge batch: Erebus on its 4 winning maps + Lorem Ipsum + sporks long-game maps"
-fcode match unrated $EREBUS $EREBUS_MAPS 2>&1 | tail -1
-fcode match unrated $LOREM  $EREBUS_MAPS 2>&1 | tail -1
-fcode match unrated $SPORKS $SPORKS_MAPS 2>&1 | tail -1
+for spec in "$EREBUS ${EREBUS_MAPS}" "$LOREM ${EREBUS_MAPS}" "$SPORKS ${SPORKS_MAPS}"; do
+    out=$(fcode match unrated ${=spec} 2>&1 | tail -1)
+    print -r -- "$out"
+    print -r -- "${out##*/}" >> $IDS
+done

@@ -33,6 +33,9 @@ import threading
 from typing import Any
 
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import botpath  # noqa: E402  (needs sys.path set above)
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_MAPS_DIR = PROJECT_ROOT / "maps"
 
@@ -56,6 +59,10 @@ DEFAULT_SUITE = ("Ladder_v36", "loki", "Khaos", "Hermod", "Heimdall_v3")
 # Heimdall_v3 and our own bot all build ~0, so a sentinel-targeting change
 # measured in self-play ranked two variants in the exact opposite order to the
 # same change measured against Khaos. Use --bots X Khaos for turret-matchup work.
+#
+# Bot names resolve through tools/botpath.py: bots/ is the active submission
+# alone, and past champions, reference opponents and superseded lineages live
+# under frozen/. Pass a bare name; an explicit path still overrides.
 SUITE_WEIGHTS = {"Ladder_v36": 4.0}
 DEFAULT_WEIGHT = 1.0
 
@@ -229,11 +236,7 @@ def snapshot_bots(names: list[str], dest: Path) -> dict[str, str]:
     dest.mkdir(parents=True, exist_ok=True)
     resolved = {}
     for name in names:
-        source = Path(name).expanduser()
-        if not source.is_dir():
-            source = PROJECT_ROOT / "bots" / name
-        if not source.is_dir():
-            raise ValueError(f"bot not found: {name}")
+        source = botpath.resolve(name)
         target = dest / Path(name).name
         shutil.copytree(
             source, target, dirs_exist_ok=True,

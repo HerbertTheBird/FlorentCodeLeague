@@ -22,5 +22,33 @@ elif [[ $# == 1 && $1 == *.replay26 ]]; then
     exec python3 tools/watch2d.py "$1"
 fi
 
-.venv/bin/fcode run "$@"
+if [[ -x .venv/bin/fcode ]]; then
+    FCODE=.venv/bin/fcode
+elif (( $+commands[fcode] )); then
+    FCODE=$commands[fcode]
+else
+    print -u2 "run2d: fcode not found; create .venv or install fcode on PATH"
+    exit 127
+fi
+
+# Bots live in three places now -- bots/ is the active submission alone, and
+# everything else is under frozen/{champions,opponents,archive}. Resolve the
+# first two arguments through tools/botpath.py so bare names keep working
+# (./run2d Heimdall_v6 loki) wherever the bot actually sits. Anything that does
+# not resolve is passed through untouched, so paths and flags still work.
+resolve_bot() {
+    local p
+    if p=$(python3 tools/botpath.py "$1" 2>/dev/null); then
+        print -r -- "$p"
+    else
+        print -r -- "$1"
+    fi
+}
+
+if (( $# >= 2 )); then
+    A=$(resolve_bot "$1"); B=$(resolve_bot "$2"); shift 2
+    set -- "$A" "$B" "$@"
+fi
+
+"$FCODE" run "$@"
 exec python3 tools/watch2d.py $REPLAY

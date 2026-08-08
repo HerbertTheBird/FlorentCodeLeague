@@ -13,3 +13,6 @@ venv/
 .idea/
 .DS_Store
 .ur_mapset
+
+# local UR bookkeeping: which matches were loss-map revenge batches
+.ur_revenge_ids
