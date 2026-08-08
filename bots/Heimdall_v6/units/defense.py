@@ -128,6 +128,59 @@ behaviour change like any other and has to earn its place on the scoreboard.
     route above the rush                  50.0%   rejected
     out-of-zone enemy-builder chase off   48.5%   rejected
 
+--- the early core death, and why we do not fix it ---------------------------
+
+Measured over a 330-match pool -- this bot against loki, Khaos, Hermod,
+Heimdall v3 and Champion_v48, all 33 maps, both sides, 72.7% overall:
+
+    losses by condition     core destroyed 78, titanium collected 12
+    core deaths before t250 59 of 90 losses
+    median death turn       116
+    by opponent             every one of the five, 5 to 17 each
+    we led on titanium in   23 of the 59
+
+So two thirds of everything we lose is an early core death, it is not
+opponent-specific, and it is not an economic loss. The obvious reading is that
+the map-wide rush (cut, score 13, CUT_RANGE 99) empties the base during exactly
+the window we die in, and the obvious fix is to keep builders home until it
+passes.
+
+That fix has now been tried four separate ways and lost every time:
+
+    rush only after round 120              43.9%
+    rush only after round 200              45.5%
+    near-side builders only                83.3% local / 55.0% unrated
+    rush only once 3 harvesters are up     71.2%
+
+The round-gated version flips fjord -- our single worst early-death map, six of
+the 59 -- from a turn-65 loss to a turn-228 win, and still loses six points
+across the pool. The early deaths are the price of the strategy, not a defect in
+it: the same builders that are not home to defend are the ones sealing their
+core, and that trade is positive. Stop trying to buy them back.
+
+--- blocking the repair walk (measured, not shipped) ------------------------
+
+Idea: when demolishing an enemy conveyor we lose the exchange on rate -- we do
+2 damage for 2 Ti a turn, they repair 4 HP for 1 Ti -- so instead of attacking,
+spend the turn on a barrier that lengthens their walk to a tile they could
+repair from. Each extra step they take is a free turn of damage, so a block
+buying 2+ steps beats the attack it replaces.
+
+Implemented with a cardinal BFS from the enemy builders to the target's heal
+tiles, with and without each candidate barrier. It measures 48.5% (and 47.0%
+with the threshold loosened to 2 steps), and the instrumentation says why:
+
+    demolition branch reached    saga 16, hive 40, heart 0, twins 0 per game
+    best available gain          0 in ~90% of evaluations
+    blocks actually placed       ~1 per game
+
+The geometry kills it. A barrier can only go on a tile cardinally adjacent to
+the builder, and a builder attacking a conveyor is standing ON one of that
+conveyor's four heal tiles -- the other three are diagonal from it, so they can
+never be blocked directly. Only a corridor squeeze is reachable, and those are
+rare. Worth revisiting only alongside a change that lets the attacker choose its
+approach tile for blocking value rather than for adjacency.
+
 --- v48/v49, from debugging a 1-4 ladder loss to Erebus (rank #7) ------------
 
 Against Champion_v47:
