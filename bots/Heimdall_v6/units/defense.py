@@ -128,6 +128,33 @@ behaviour change like any other and has to earn its place on the scoreboard.
     route above the rush                  50.0%   rejected
     out-of-zone enemy-builder chase off   48.5%   rejected
 
+--- measuring against two opponents at once ---------------------------------
+
+Since v51 every candidate is measured twice: self-play against the current
+champion, and against Khaos. Khaos is the only local bot that fields sentinels
+(4 a game; loki, Hermod, Heimdall v3 and we ourselves build ~0), and the two
+instruments have disagreed outright often enough that one number is not enough.
+
+Re-measured on the v51 base, against a 80.3% Khaos baseline:
+
+                                   vs Khaos   self-play
+    ammo floor of 60 Ti              72.7%      56.1%    disagree
+    harvest above route              80.3%      50.0%    INERT
+    gunner fire-value gate           80.3%      50.0%    INERT
+    reachability bans expire         75.8%      48.5%    rejected
+    SCORE_THRESHOLD_FACTOR 0.15      80.3%      50.0%    inert
+    SCORE_THRESHOLD_FACTOR 0.40      78.8%      48.5%
+    SCORE_THRESHOLD_FACTOR 0.60      74.2%        --
+                       (0.25 is the shipped value and the optimum)
+
+The two marked INERT return games byte-identical to the baseline against BOTH
+opponents. They come from replay analysis of sporks games -- we build zero
+harvesters after round 200 in 4 of 5 long games, and 82% of our gunner damage
+lands on conveyors -- and the diagnosis looks right. They simply never fire
+against any opponent available locally, because none of them pressures our
+economy the way a top ladder bot does. Those two cannot be evaluated here at
+all; they need a real opponent, which means shipping them to find out.
+
 --- the early core death, and why we do not fix it ---------------------------
 
 Measured over a 330-match pool -- this bot against loki, Khaos, Hermod,
