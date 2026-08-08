@@ -48,7 +48,16 @@ nav: Pathing = None
 _cost_map: dict[int, tuple[int, int]] = {}  # tile index -> (min titanium cost, round recorded)
 COST_MAP_TTL = 100
 
-unpathable = 0
+# A failed conveyor path is a snapshot of this turn's conditions, not a property
+# of the tile: routing `avoid` (map_info.get_avoid(True)) drops enemy turret
+# threat, every conveyor, and our own conveyors' output tiles, all of which move
+# turn to turn. This used to be a plain bitmask that was only ever OR'd into and
+# never cleared, so one miss -- a gunner covering the lane for three turns, a
+# teammate closing the corridor -- blacklisted the tile for the rest of the game
+# for this bot, and the `nav.closest` miss below blacklisted the whole candidate
+# set at once. Expire entries the way _cost_map already does.
+UNPATHABLE_TTL = 40
+_unpathable: dict[int, int] = {}   # tile index -> round recorded
 
 def init(c: Controller):
     global rc, nav
@@ -70,6 +79,30 @@ def _too_expensive():
     for n in stale:
         del _cost_map[n]
     return result
+
+def _mark_unpathable(mask: int):
+    """Record every tile in `mask` as unroutable as of this round."""
+    current = rc.get_current_round()
+    while mask:
+        lsb = mask & -mask
+        mask ^= lsb
+        _unpathable[lsb.bit_length() - 1] = current
+
+
+def _unpathable_mask():
+    """Bitmask of tiles whose last path attempt failed recently enough to skip."""
+    current = rc.get_current_round()
+    result = 0
+    stale = []
+    for n, turn in _unpathable.items():
+        if turn + UNPATHABLE_TTL < current:
+            stale.append(n)
+            continue
+        result |= 1 << n
+    for n in stale:
+        del _unpathable[n]
+    return result
+
 
 def _dead_end_conveyors():
     """Bitmask of routable conveyors whose output is not connected to my ore-accepting network."""
@@ -128,7 +161,7 @@ def cant_claim():
 def _my_claims():
     w = map_info._width
     my_mask = 1 << (map_info._my_pos.x + map_info._my_pos.y * w)
-    avoid = _too_expensive() | cant_claim() | unpathable
+    avoid = _too_expensive() | cant_claim() | _unpathable_mask()
     not_blocked_mask = not_blocked()
     candidates = (
         _dead_end_conveyors()
@@ -148,7 +181,6 @@ def score():
     return 5 if _cached_claims else 0
 
 def run():
-    global unpathable
     log("ROUTE")
     candidates = _cached_claims
     if not candidates:
@@ -163,7 +195,7 @@ def run():
         candidate, _ = nav.closest(candidates)
         if candidate is None:
             log("no closest???")
-            unpathable |= candidates
+            _mark_unpathable(candidates)
             return
         cand_n = candidate.x + candidate.y * width
         cand_bit = 1 << cand_n
@@ -171,7 +203,7 @@ def run():
         cand_path = nav.calculate_conveyor_path(candidate, update=not cand_is_harvester)
         log("PATH", cand_path)
         if cand_path is None:
-            unpathable |= cand_bit
+            _mark_unpathable(cand_bit)
             candidates &= ~cand_bit
             continue
         cost = nav.conveyor_cost(min(cand_path[2], PAYG_HORIZON))
@@ -180,18 +212,37 @@ def run():
             log("can't afford", cost)
             candidates &= ~cand_bit
             continue
+
+        tc0 = cand_path[0]
+        occupant = map_info.type_at(tc0.x, tc0.y)
+        # If an enemy building sits on the tile we'd route through we can't path
+        # here — we don't attack it. Skip this candidate and try the next rather
+        # than returning: `_bm_dead_end` includes the target tile of our own
+        # conveyor pointing into an enemy building, and bailing outright meant a
+        # bot whose closest candidate was such a tile re-picked it every round
+        # and did nothing for as long as that building stood.
+        if occupant is not None and map_info.team_at(tc0.x, tc0.y) != map_info._my_team:
+            _mark_unpathable(cand_bit)
+            candidates &= ~cand_bit
+            continue
+        # A tile that already holds one of our buildings — the hard_block
+        # re-orient case, our conveyor whose output can neither accept titanium
+        # nor be built on — must be destroyed before it can be re-laid, and the
+        # destroy is gated on the spawn reserve. Quote that here instead of
+        # discovering it inside attempt_build, where failing the gate leaves the
+        # conveyor standing, makes can_build_conveyor False, and burns the turn
+        # on a candidate we could never act on — every turn, until titanium
+        # recovers past the flat 40 Ti reserve.
+        if occupant is not None and rc.get_global_resources() < rc.get_conveyor_cost() + map_info.ti_reserve():
+            log("destroy blocked by reserve")
+            candidates &= ~cand_bit
+            continue
+
         best = candidate
         target_conveyor = [cand_path[0], cand_path[1]]
         break
 
     if best is None:
-        return
-
-    # If an enemy building sits on the tile we'd route through, we simply can't
-    # path here — we don't attack it, so just bail this turn.
-    tc0 = target_conveyor[0]
-    if (map_info.type_at(tc0.x, tc0.y) is not None
-            and map_info.team_at(tc0.x, tc0.y) != map_info._my_team):
         return
 
     def attempt_build():

@@ -540,6 +540,26 @@ def _update_conv_reverse_outputs(
         outputs ^= lsb
 
 
+def _takers_of(tiles: int, convs: int) -> int:
+    """Conveyor-likes in `convs` that draw from any tile in `tiles`.
+
+    A conveyor accepts input from every adjacent tile except the one it points
+    into. This is the same relation `route.not_blocked` encodes in the opposite
+    direction (there: which tiles already have something drawing from them), so
+    keep the two in step.
+    """
+    if not tiles or not convs:
+        return 0
+    w = _width
+    dir_mask = _bm_dir
+    return (
+        (((tiles & _not_right_col) << 1) & convs & ~dir_mask[_DIR_W])
+        | (((tiles & _not_left_col) >> 1) & convs & ~dir_mask[_DIR_E])
+        | (((tiles & _not_bottom_row) << w) & convs & ~dir_mask[_DIR_N])
+        | (((tiles & _not_top_row) >> w) & convs & ~dir_mask[_DIR_S])
+    ) & _board_mask
+
+
 def _conveyor_target_tiles(source_mask: int) -> int:
     """Return the union of output target tiles for the given conveyor-like
     sources. Splitters include their primary output and both side outputs."""
@@ -1302,6 +1322,16 @@ def _compute_route_reaches_core() -> tuple[int, tuple[int, ...]]:
     return result
 
 
+# How many hops downstream of a *visible* titanium source still count as a
+# dead-end source. 1 is enough for the per-hop stall the walk exists to fix (the
+# tip route just laid is exactly one hop below the conveyor feeding it); larger
+# values additionally keep a stretch of conveyors that never received titanium
+# extendable, which is otherwise unroutable forever at any distance from the
+# core. Read it like PAYG_HORIZON in route.py -- a knob to sweep, where too
+# large means committing builders to chains whose source may already be dead.
+DEAD_END_LOOKAHEAD = 3
+
+
 def _compute_route_targets() -> int:
     """Bitmask of tiles the route state can path toward.
 
@@ -1309,10 +1339,17 @@ def _compute_route_targets() -> int:
     minus any that are part of a connected run of 4+ believed-loaded conveyors.
     My core area is always routable.
 
-    Side effect: sets `_bm_dead_end` to the targets of any *loaded* conveyor
+    Side effect: sets `_bm_dead_end` to the targets of any *source* conveyor
     whose output is nothing or a building not in (conveyor-type, my core,
     my sentinel, my gunner). Also includes my conveyors pointing into an enemy
-    building.
+    building. Sources are the loaded conveyors plus everything within
+    DEAD_END_LOOKAHEAD hops downstream of a visible titanium source.
+
+    Note `_bm_dead_end` mixes two tile kinds, and route repairs them
+    differently: an empty output tile (`tbit`) is where a new conveyor gets
+    built, while the conveyor's own tile (`lsb`, the `hard_block` branch) is a
+    conveyor whose output can neither accept titanium nor be built on, so route
+    destroys and re-lays it facing a new direction.
     """
     my_team_idx = _my_team_idx
     bm_my = _bm_team[my_team_idx]
@@ -1321,10 +1358,16 @@ def _compute_route_targets() -> int:
     visible_loaded_mine = my_convs & loaded_union & _bm_visible
     global _bm_dead_end
     global _route_targets_cache_key, _route_targets_cache
+    # Seeds for the DEAD_END_LOOKAHEAD walk below. Both are visibility-gated, so
+    # they belong in the cache key: `visible_loaded_mine` does not move when only
+    # a harvester enters or leaves vision, and serving a stale `_bm_dead_end`
+    # from the early return is exactly the blindness this walk exists to remove.
+    my_harvesters_seen = _bm_et[_IDX_HARVESTER] & bm_my & _bm_visible
     key = (
         _struct_version,
         _bm_conv_ti,
         visible_loaded_mine,
+        my_harvesters_seen,
     )
     if key == _route_targets_cache_key:
         rt, de = _route_targets_cache
@@ -1353,10 +1396,38 @@ def _compute_route_targets() -> int:
 
     loaded_sources = all_convs & loaded_union
 
-    # --- Dead-ends: targets of any *loaded* conveyor whose output isn't
+    # --- Extend the source set a bounded distance downstream of visible ------
+    # titanium sources. A conveyor laid this turn is empty, so on a loaded-only
+    # source set the chain it extends goes invisible to route for at least a
+    # turn: the new tip is not loaded, and the conveyor now feeding it points
+    # into an accepting building so it produces no dead end either. Route then
+    # scores 0 and the builder is free to be claimed by a higher state, which is
+    # how chains get abandoned a few hops short of the core.
+    #
+    # Two seed kinds. Visible loaded conveyors cover the general case; conveyors
+    # drawing from one of my visible harvesters cover hop 2, where the harvester
+    # has already stopped being an orphan candidate (route.not_blocked drops it
+    # as soon as anything draws from it) but hop 1 has not received titanium yet.
+    #
+    # Seeds are visibility-gated on purpose. `_bm_conv_ti` is sticky for tiles
+    # out of vision -- update_at only writes tiles we actually read -- so seeding
+    # on remembered state would invent frontiers on chains last looked at
+    # hundreds of rounds ago.
+    seeds = visible_loaded_mine | _takers_of(my_harvesters_seen, my_convs)
+    extra = 0
+    visited = seeds
+    frontier = seeds
+    for _ in range(DEAD_END_LOOKAHEAD):
+        frontier = _conveyor_target_tiles(frontier) & my_convs & ~visited
+        if not frontier:
+            break
+        visited |= frontier
+        extra |= frontier
+
+    # --- Dead-ends: targets of any source conveyor whose output isn't
     # accepting (or, for my conveyors, points into an enemy building).
     dead_ends = 0
-    mask = loaded_sources
+    mask = loaded_sources | seeds | extra
     while mask:
         lsb = mask & -mask
         mask ^= lsb
