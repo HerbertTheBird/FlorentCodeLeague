@@ -51,10 +51,9 @@ def run():
     if best is None:
         return
 
-    width = map_info._width
-
-    best_n = best.x + best.y * width
-    nav.move_adjacent(best)
     if rc.can_build_barrier(best) and rc.get_global_resources() >= rc.get_barrier_cost() + map_info.ti_reserve():
         rc.build_barrier(best)
         map_info.update_at(best)
+        return
+
+    nav.move_adjacent(best)
