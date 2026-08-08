@@ -27,7 +27,7 @@ def init(c: Controller):
 
 def _resolve_target_on_tile(tile: Position):
     """Return (etype, hp) of what a sentinel shot at `tile` would actually hit,
-    or None if the tile is empty / friendly / a marker. Sentinels (like all
+    or None if the tile is empty or friendly. Sentinels (like all
     turrets) hit a builder bot before any building on the same tile."""
     my_team = map_info._my_team
     bot_id = rc.get_tile_builder_bot_id(tile)

@@ -1828,12 +1828,7 @@ def update(recompute: bool = True) -> None:
 
 
 def is_tile_empty(pos: Position):
-    if not in_bounds(pos):
-        return False
-    if _rc.is_tile_empty(pos):
-        return True
-    bid = _rc.get_tile_building_id(pos)
-    return bid is not None and _rc.get_entity_type(bid) is EntityType.MARKER
+    return in_bounds(pos) and _rc.is_tile_empty(pos)
 
 
 def has_builder_bot(pos: Position, include_self: bool = False) -> bool:
@@ -1844,15 +1839,6 @@ def has_builder_bot(pos: Position, include_self: bool = False) -> bool:
     n = pos.x + pos.y * _width
     bit = 1 << n
     return bool((_bm_friendly_bots | _bm_enemy_bots) & bit)
-
-def can_place_at_restrictive(pos: Position):
-    if not in_bounds(pos): 
-        return False
-    if is_tile_empty(pos): 
-        return True
-    # Florent has no ROAD entity (Cambridge-only), so an occupied tile is never
-    # a free-to-pave one: only genuinely empty tiles qualify.
-    return False
 
 def is_passable(pos: Position):
     """True if a builder bot could stand on `pos`.

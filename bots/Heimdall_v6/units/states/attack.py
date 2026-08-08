@@ -489,8 +489,8 @@ def _compute_gunner_dir_scores(enemy_team_bm, threat, gunner_masks):
     direction d — but ONLY if n is a valid placement tile for that direction
     (per `gunner_masks[d]`); otherwise the score reads 0.
 
-    Gunner rays are blocked by walls AND by allied non-road, non-marker
-    buildings. Scores come from GUNNER_BUILDING_SCORE, applied with a per-step
+    Gunner rays are blocked by walls AND by any allied building. Scores come
+    from GUNNER_BUILDING_SCORE, applied with a per-step
     distance discount (round(score * 0.9^k) for an enemy at ray-step k from
     the gunner — k=0 is the adjacent tile). Each gunner tile additionally
     gains a rotation bonus equal to (sum_of_8_directions >> _ROTATION_SHIFT),
@@ -623,10 +623,9 @@ def get_best_direction(pos):
 
     Sentinel and gunner both use their best valid-placement direction score
     as the decision basis. Non-good tiles get a uniform selection bias so
-    friendly "good" conveyors/bridges are less likely to be sacrificed for
-    low-value attacks.
-
-    Breach is ignored for now — never returned."""
+    friendly "good" conveyors are less likely to be sacrificed for
+    low-value attacks."""
+    
     w = map_info._width
     px, py = pos.x, pos.y
     n = px + py * w
@@ -1051,9 +1050,6 @@ def _try_launcher_lockdown(target: Position) -> bool:
     my_team = map_info._bm_team[my_team_idx]
 
     walls = map_info._bm_env[map_info._IDX_ENV_WALL]
-    # Florent has no ROAD entity (it exists only in the Cambridge ruleset this
-    # code was ported from), so there is never a road to build over.
-    my_road = 0
     my_barrier = bm_et[map_info._IDX_BARRIER] & my_team
 
     # Existing friendly launcher 3x3s and friendly barriers are already
@@ -1087,10 +1083,10 @@ def _try_launcher_lockdown(target: Position) -> bool:
     my_pos = map_info._my_pos
     my_bit = 1 << (my_pos.x + my_pos.y * w)
 
-    # Adjacent buildable tiles: empty, our own road, or our own barrier
-    # (the latter only used when placing a launcher; we'll destroy first).
+    # Adjacent buildable tiles: empty, or our own barrier (the latter only used
+    # when placing a launcher; we'll destroy first).
     candidates = map_info.expand_chebyshev(my_bit) & ~my_bit
-    candidates &= ((~map_info._bm_any_building) | my_road | my_barrier) & ~walls
+    candidates &= ((~map_info._bm_any_building) | my_barrier) & ~walls
     candidates &= ~map_info._bm_friendly_bots & ~map_info._bm_enemy_bots
     candidates &= ~map_info._bm_enemy_turret_threat
     if not candidates:
@@ -1151,7 +1147,7 @@ def _try_launcher_lockdown(target: Position) -> bool:
     options.sort(key=lambda o: (-o[0], -o[1]))
     delta, _, kind, best_p, best_lsb = options[0]
 
-    if (best_lsb & (my_road | my_barrier)) and rc.can_destroy(best_p):
+    if (best_lsb & my_barrier) and rc.can_destroy(best_p):
         rc.destroy(best_p)
         map_info.update_at(best_p)
 

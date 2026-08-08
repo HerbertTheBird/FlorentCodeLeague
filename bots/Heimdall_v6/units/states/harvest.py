@@ -69,11 +69,11 @@ def possible_ore():
     my_team_idx = map_info._my_team_idx
     enemy_idx = 1 - my_team_idx
 
-    # Enemy buildings that block harvesting (not road/conveyor/bridge/splitter/marker)
+    # Any enemy building blocks harvesting.
     enemy_blocking = (
         map_info._bm_team[enemy_idx]
     )
-    # Friendly buildings that block harvesting (not road/barrier/marker)
+    # Friendly buildings that block harvesting (all but conveyor/barrier/harvester)
     friendly_blocking = (
         map_info._bm_team[my_team_idx]
         & ~map_info._bm_et[map_info._IDX_CONVEYOR]
