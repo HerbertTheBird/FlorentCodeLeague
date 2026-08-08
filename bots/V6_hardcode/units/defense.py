@@ -128,44 +128,6 @@ behaviour change like any other and has to earn its place on the scoreboard.
     route above the rush                  50.0%   rejected
     out-of-zone enemy-builder chase off   48.5%   rejected
 
---- why we do not build gunners to kill sentinels ---------------------------
-
-Two things, and the second is the interesting one.
-
-FIRST, until now we structurally could not. _get_attack_candidates returns
-nothing unless some placement scores at least MIN_ATTACK_SCORE + THREAT_PENALTY.
-v48 dropped GUNNER -> SENTINEL from 100 to 20 (worth 6 points then, when the
-floor was 16 + 4 = 20) and v51 raised MIN_ATTACK_SCORE to 28, putting the floor
-at 32. From v51 on, EVERY anti-turret weight except GUNNER -> GUNNER sat under
-the floor -- sentinel 20, launcher 14, and both of the sentinel table's turret
-entries at 20 and 8. A turret whose only target was an enemy sentinel could not
-be placed at any price, on any map. Two separately-measured, individually-sound
-changes composed into a defect neither of them had.
-
-SECOND, and this is why it stays: fixing it loses. Lifting GUNNER -> SENTINEL
-over the floor was measured on all three instruments --
-
-                    vs Khaos     self-play    vs Rusher
-    baseline          78.8%         --          34.8%
-    weight 40         74.2%        48.5%        33.3%
-    weight 64         75.8%        45.5%        33.3%
-
--- including against frozen/opponents/Rusher, which exists precisely to test
-this and kills an undefended core by turn 49 median.
-
-The arithmetic says why. Killing a 40 HP sentinel with a gunner costs 20 Ti for
-the gunner plus six shots at 4 Ti of ammo = 44 Ti, and the gunner has to be
-sited within 3 tiles of it, on ground the enemy is pushing through. Simply
-out-healing that sentinel costs 4 HP per 1 Ti against its 9 HP a round -- about
-2.25 Ti a round, so 44 Ti buys twenty rounds of ignoring it entirely. Damage
-costs 1 Ti per 1.8 HP no matter which turret pays it; repair buys 4 HP per Ti.
-The defender's titanium is worth more than twice the attacker's, and the answer
-to a sieging sentinel is to out-repair it, not to trade buildings with it.
-
-That also explains why the v48 core-repair change was worth 3 points and why
-Rusher -- which has no economy by design -- stalemates us on 9 of 66 maps once
-its opening bank runs dry: we heal faster than it can spend.
-
 --- the turret-siting lever is spent ----------------------------------------
 
 Raising MIN_ATTACK_SCORE 16 -> 28 in v51 was worth ~7 points on both
