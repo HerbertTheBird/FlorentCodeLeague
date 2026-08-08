@@ -27,8 +27,29 @@
 # Read results with:  python3 tools/ur_summary.py --limit 200
 # Platform limit is 5 unrated matches per 10 minutes, so each version's round
 # takes ~10 minutes per 5 opponents.
+# !! SHARED LADDER SLOT !!
+# Other teammates submit and activate too. This script changes the ACTIVE
+# submission twice, so running it unattended will silently replace whatever a
+# teammate just shipped -- and their ladder matches will then be played by our
+# A version. It refuses to run without ALLOW_ACTIVATE=1 for that reason, and it
+# records the version that was active on entry so the trap restores THAT rather
+# than assuming ours should win.
+#
+# Prefer the passive route when you can: unrated results carry
+# teamAVersion/teamBVersion, so tools/ur_summary.py attributes matches to the
+# exact submission that played them without anyone touching activation.
 set -e
 cd "${0:A:h}/.."
+
+if [[ "$ALLOW_ACTIVATE" != "1" ]]; then
+    print -u2 "ur_ab: this changes the ACTIVE ladder submission twice, and teammates"
+    print -u2 "       submit in parallel. Re-run with ALLOW_ACTIVATE=1 if that is fine"
+    print -u2 "       right now, after checking \`fcode submission list\`."
+    exit 3
+fi
+
+PREV_ACTIVE=$(fcode submission list --json 2>/dev/null \
+    | python3 -c 'import sys,json;d=json.load(sys.stdin);s=d if isinstance(d,list) else d.get("submissions",[]);print(next((str(x.get("version")) for x in s if x.get("active")),""))' 2>/dev/null || print "")
 
 VA=$1; VB=$2; shift 2
 if [[ -z "$VA" || -z "$VB" || $# -eq 0 ]]; then
@@ -64,7 +85,11 @@ run_round() {
 }
 
 # Whatever happens, do not leave the ladder on the A version.
-restore() { fcode submission activate "$VB" >/dev/null 2>&1 || true }
+restore() {
+    local back="${PREV_ACTIVE:-$VB}"
+    print "restoring active submission to v$back"
+    fcode submission activate "$back" >/dev/null 2>&1 || true
+}
 trap restore EXIT INT TERM
 
 run_round $VA
