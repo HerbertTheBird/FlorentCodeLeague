@@ -274,7 +274,8 @@ def run():
     # Sync round info
     map_info.update()
     comms.read()          # absorb every slot's shared tiles/symmetry, broadcast our own
-    alarm = comms.read_alarm()   # once per turn: also ages the sentry's heartbeat
+    alarm = comms.read_alarm()   # ages slot 15 by round number, so calling it
+                                 # more than once a turn is harmless
     comms.write()
     map_info.recompute_derived()
     for i in map_info.iter_mask(map_info._bm_env[map_info._IDX_ENV_WALL]):

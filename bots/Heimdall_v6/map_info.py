@@ -1089,6 +1089,66 @@ def note_symmetry_conflict(n: int, env_idx: int) -> None:
         if (_bm_seen & fbit) and not (_bm_env[env_idx] & fbit):
             _rot_sym = False
 
+def record_relayed_tile(n: int, env_idx: int) -> bool:
+    """Record env `env_idx` at tile `n` (and its mirror) from a comms relay.
+
+    The counterpart of `update_at`'s env/seen block for tiles this unit never
+    saw itself, and the ONLY supported way for comms to write pooled terrain.
+    It owns the same invariants `update_at` does -- the core-area skip, the
+    symmetry-conflict note, the solved-symmetry mirror, and the `_struct_version`
+    bump that invalidates every wall-derived cache -- so comms does not have to
+    re-derive them by hand and drift when this file changes.
+
+    Returns True if anything new was written (i.e. the caller should
+    `recompute_derived()`)."""
+    global _bm_seen, _struct_version
+    bit = 1 << n
+    # Core-area tiles are owned by build_core_areas(): update_at returns before
+    # touching their env/seen state, so relayed hearsay must not fill it in
+    # either. This is load-bearing, not just tidiness -- because those tiles are
+    # never in _bm_seen, the relaying unit's own env lookup reports them as
+    # EMPTY (the wire has no "unknown" code), so accepting them here would brand
+    # a core footprint as permanently-seen empty floor.
+    if (_bm_my_core_area | _bm_their_core_area) & bit:
+        return False
+    if _bm_seen & bit:
+        return False
+    _bm_env[env_idx] |= bit
+    _bm_seen |= bit
+    # Relayed tiles never pass through update_at, so derive symmetry here -- this
+    # is how the core (and anyone else) infers symmetry from pooled vision.
+    note_symmetry_conflict(n, env_idx)
+    if _solved_sym:
+        x = n % _width
+        y = n // _width
+        if _hor_sym:
+            fx, fy = _width - 1 - x, y
+        elif _ver_sym:
+            fx, fy = x, _height - 1 - y
+        elif _rot_sym:
+            fx, fy = _width - 1 - x, _height - 1 - y
+        else:
+            fx = fy = -1
+        if fx >= 0:
+            fbit = 1 << (fx + fy * _width)
+            # Only fill an UNSEEN mirror. update_at writes its mirror blind,
+            # which is safe there because it has just observed the tile itself;
+            # here the source is hearsay, and overwriting a mirror we already
+            # know would leave two env bits set for one tile -- ground_at would
+            # then answer WALL for something recorded as ore.
+            if (not (_bm_seen & fbit)
+                    and not ((_bm_my_core_area | _bm_their_core_area) & fbit)):
+                _bm_env[env_idx] |= fbit
+                _bm_seen |= fbit
+    # Newly-recorded walls block gunner rays in _compute_enemy_turret_threat and
+    # _compute_my_gunner_claims and feed _bm_blocked, all of which are memoised
+    # on _struct_version. Without this bump the caller's recompute_derived() is
+    # a no-op and the wall never reaches _bm_blocked. Same reason as update_at.
+    if env_idx == _IDX_ENV_WALL:
+        _struct_version += 1
+    return True
+
+
 def hor_flip(pos: Position) -> Position:
     return Position(_width - 1 - pos.x, pos.y)
 def ver_flip(pos: Position) -> Position:
