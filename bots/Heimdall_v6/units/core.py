@@ -243,27 +243,17 @@ def _spawn_under_siege(titanium: int) -> bool:
     return False
 
 
-def _scan_nearby_builders(core_pos: Position, my_team):
+def _count_nearby_allies(core_pos: Position, my_team) -> int:
+    """Friendly builders within DEFENSE_FRIENDLY_RADIUS_SQ of the core."""
     ally_builder_count = 0
-    has_close_ally = False
-    closest_enemy = None
-    closest_enemy_d = None
-
     for uid in rc.get_nearby_units():
         if rc.get_entity_type(uid) != EntityType.BUILDER_BOT:
             continue
-        p = rc.get_position(uid)
-        if rc.get_team(uid) == my_team:
-            if p.distance_squared(core_pos) <= DEFENSE_FRIENDLY_RADIUS_SQ:
-                ally_builder_count += 1
-                has_close_ally = True
-        else:
-            d = p.distance_squared(core_pos)
-            if (closest_enemy_d is None or d < closest_enemy_d) and d <= 20:
-                closest_enemy_d = d
-                closest_enemy = p
-
-    return ally_builder_count, has_close_ally, closest_enemy
+        if rc.get_team(uid) != my_team:
+            continue
+        if rc.get_position(uid).distance_squared(core_pos) <= DEFENSE_FRIENDLY_RADIUS_SQ:
+            ally_builder_count += 1
+    return ally_builder_count
 
 
 def run():
@@ -298,7 +288,7 @@ def run():
     # On-demand defence takes priority over every economic spawn: the whole
     # point of reserving a builder's cost (map_info.ti_reserve) is that this
     # spawn is always affordable the round it is needed.
-    ally_builder_count, _has_close_ally, _closest_enemy = _scan_nearby_builders(core_pos, my_team)
+    ally_builder_count = _count_nearby_allies(core_pos, my_team)
     threat = _threat_to_answer(alarm)
     map_info.arm_reserve(threat is not None)
     if not (threat is not None and _spawn_defender(alarm, threat)):

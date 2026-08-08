@@ -18,7 +18,7 @@ weight (HP as sub-tiebreak).
 from main import has_op
 from fcode import EntityType, Position
 import map_info
-from log import log
+from log import DEBUG_LOGGING, log
 
 
 def _turret_et_for_idx(idx: int):
@@ -108,23 +108,24 @@ def _apply_tiebreaks(pool, nav, one_shot_hp: int, enemy_bots: int, label: str):
     if not pool:
         return None
 
-    def _dist(c):
-        if not enemy_bots:
-            return None
-        _, d = nav.closest(enemy_bots, pos=c[0])
-        return d  # -1 means unreachable
+    if DEBUG_LOGGING:
+        def _dist(c):
+            if not enemy_bots:
+                return None
+            _, d = nav.closest(enemy_bots, pos=c[0])
+            return d  # -1 means unreachable
 
-    def _fmt_dist(d):
-        if d is None:
-            return "n/a"
-        if d == -1:
-            return "inf"
-        return str(d)
+        def _fmt_dist(d):
+            if d is None:
+                return "n/a"
+            if d == -1:
+                return "inf"
+            return str(d)
 
-    log(f"  [{label}] pool size={len(pool)}: " + ", ".join(
-        f"({c[0].x},{c[0].y}) et={c[4].value} w={c[2]} hp={c[3]} d={_fmt_dist(_dist(c))}"
-        for c in pool
-    ))
+        log(f"  [{label}] pool size={len(pool)}: " + ", ".join(
+            f"({c[0].x},{c[0].y}) et={c[4].value} w={c[2]} hp={c[3]} d={_fmt_dist(_dist(c))}"
+            for c in pool
+        ))
     one_shots = [c for c in pool if c[3] <= one_shot_hp]
     if one_shots:
         log(f"  [{label}] one-shot filter ({one_shot_hp}): {len(one_shots)}/{len(pool)} kept")
@@ -140,9 +141,10 @@ def _apply_tiebreaks(pool, nav, one_shot_hp: int, enemy_bots: int, label: str):
             if dist == -1:
                 dist = 1 << 30
             scored.append((dist, c))
-        log(f"  [{label}] dist-to-enemy-bot: " + ", ".join(
-            f"({c[0].x},{c[0].y})={d if d < (1<<29) else 'inf'}" for d, c in scored
-        ))
+        if DEBUG_LOGGING:
+            log(f"  [{label}] dist-to-enemy-bot: " + ", ".join(
+                f"({c[0].x},{c[0].y})={d if d < (1<<29) else 'inf'}" for d, c in scored
+            ))
         max_dist = max(s[0] for s in scored)
         pool = [c for d, c in scored if d == max_dist]
         log(f"  [{label}] furthest-from-bot ({max_dist if max_dist < (1<<29) else 'inf'}): {len(pool)} kept")

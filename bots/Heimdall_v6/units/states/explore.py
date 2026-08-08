@@ -28,7 +28,6 @@ def generate_explore_target():
     w = map_info._width
     nlc = map_info._not_left_col
     nrc = map_info._not_right_col
-    board = (1 << (w * map_info._height)) - 1
     if units.builder._stay_near_core:
         near = units.builder.near_core_mask()
         avoid = map_info.get_avoid(False)
@@ -46,7 +45,7 @@ def generate_explore_target():
             explore_target = Position(n % w, n // w)
             return
     avoid = map_info.get_avoid(False)
-    passable = ~avoid & board
+    passable = ~avoid & map_info._board_mask
 
     # Seed with all other builders' claimed tiles + incremental steps from
     # the nearest friendly bot toward each claim, plus my own position.

@@ -109,7 +109,7 @@ def _try_throw_enemy_away() -> bool:
             if nxt == region:
                 break
             region = nxt
-        size = bin(region).count("1")
+        size = region.bit_count()
         rm = launchable_mask & region
         while rm:
             rl = rm & -rm

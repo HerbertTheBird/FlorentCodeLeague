@@ -25,9 +25,8 @@ def _conv_zone():
     if not my_convs:
         return 0
     w = map_info._width
-    board = (1 << (w * map_info._height)) - 1
     avoid = map_info._bm_blocked
-    passable = ~avoid & board
+    passable = ~avoid & map_info._board_mask
     nlc = map_info._not_left_col
     nrc = map_info._not_right_col
     visited = my_convs

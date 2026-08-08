@@ -421,7 +421,8 @@ class Pathing:
                 if hit & start_mask:
                     return start_pos, start_pos, i
                 from_mask = hit
-                if target_mask.bit_count() == 1:
+                single_target = target_mask.bit_count() == 1
+                if single_target:
                     tn = target_mask.bit_length() - 1
                     tx = tn % w
                     ty = tn // w
@@ -445,9 +446,8 @@ class Pathing:
                 from_mask = last_working_mask
                 # Tiebreak among equal-cost first steps: pick the tile whose
                 # Chebyshev distance to the (nearest) target is smallest.
-                if target_mask.bit_count() == 1:
-                    tn = target_mask.bit_length() - 1
-                    targets = ((tn % w, tn // w),)
+                if single_target:
+                    targets = ((tx, ty),)
                 else:
                     targets = []
                     tm = target_mask
