@@ -128,33 +128,6 @@ behaviour change like any other and has to earn its place on the scoreboard.
     route above the rush                  50.0%   rejected
     out-of-zone enemy-builder chase off   48.5%   rejected
 
---- the early forward sentinel (v54) ----------------------------------------
-
-Submitting the Rusher instrument as an unrated bot produced the most useful
-result of the session. Against the live field it went 5-20 in games overall --
-0-5 to Lorem Ipsum, 0-5 to Erebus, 1-4 to Pivot, 1-4 to Jython -- and BEAT
-SPORKS 3-2. The rank-1 bot is specifically weak to an early forward sentinel,
-and it opens against us the same way.
-
-A pure rush is obviously not shippable at 20%. So this takes only the piece that
-beat them, on top of our normal economy: open the enemy-core siege gate from
-turn 1 (SIEGE_OPEN_ROUND 150 -> 0, SIEGE_MIN_HARVESTERS 2 -> 0) and let a
-sentinel value the enemy core at all (SENTINEL_BUILDING_SCORE[CORE] 16 -> 128,
-matching the gunner). Measured:
-
-                        vs current   vs Rusher   vs Khaos
-    baseline               50.0%       34.8%       78.8%
-    early forward sentinel 65.2%       36.4%       78.8%
-
-Fifteen points in self-play, slightly up against the rusher, and dead level
-against Khaos -- wins on one instrument and regresses on neither, which is the
-profile nothing else this session has managed.
-
-Note the SENTINEL core weight ALONE was measured earlier at 77.3% / 47.0% and
-rejected. It only pays once the gate is open: scoring the enemy core highly is
-worthless while the gate is holding that score at zero for the first 150 rounds.
-The two are one change.
-
 --- why we do not build gunners to kill sentinels ---------------------------
 
 Two things, and the second is the interesting one.
