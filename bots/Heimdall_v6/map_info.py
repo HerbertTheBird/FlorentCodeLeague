@@ -1318,7 +1318,7 @@ def _compute_route_reaches_core() -> tuple[int, tuple[int, ...]]:
 # tip route just laid is exactly one hop below the conveyor feeding it); larger
 # values additionally keep a stretch of conveyors that never received titanium
 # extendable, which is otherwise unroutable forever at any distance from the
-# core. Read it like PAYG_HORIZON in route.py -- a knob to sweep, where too
+# core. Read it like PAYG_HORIZON in _config.py -- a knob to sweep, where too
 # large means committing builders to chains whose source may already be dead.
 DEAD_END_LOOKAHEAD = 3
 

@@ -151,14 +151,17 @@ def _bits_of(c):
     return tuple(result)
 
 
-def _build_score_groups(score_table):
-    """Group non-core type indices by equal score."""
+def _build_score_groups(score_table, encode=_bits_of):
+    """Group non-core type indices by equal score.
+
+    `encode` turns a score into the `bits` field of each group: a flat
+    bit-position tuple for sentinels, one such tuple per ray step for gunners."""
     groups: dict[int, list[int]] = {}
     for t_idx in _NON_CORE_TYPE_INDICES:
         s = score_table[t_idx]
         if s:
             groups.setdefault(s, []).append(t_idx)
-    return [(s, _bits_of(s), tuple(idxs)) for s, idxs in groups.items()]
+    return [(s, encode(s), tuple(idxs)) for s, idxs in groups.items()]
 
 
 def _step_score(score, step):
@@ -174,20 +177,8 @@ def _step_bits_tuple(score):
     return tuple(_bits_of(_step_score(score, k)) for k in range(_MAX_DISCOUNT_STEPS))
 
 
-def _build_gunner_score_groups(score_table):
-    """Same shape as _build_score_groups, but `bits` is a per-step tuple of
-    bit-position tuples — one entry per ray step, holding the bits of the
-    discounted score at that step."""
-    groups: dict[int, list[int]] = {}
-    for t_idx in _NON_CORE_TYPE_INDICES:
-        s = score_table[t_idx]
-        if s:
-            groups.setdefault(s, []).append(t_idx)
-    return [(s, _step_bits_tuple(s), tuple(idxs)) for s, idxs in groups.items()]
-
-
 _SENTINEL_SCORE_GROUPS = _build_score_groups(SENTINEL_BUILDING_SCORE)
-_GUNNER_SCORE_GROUPS = _build_gunner_score_groups(GUNNER_BUILDING_SCORE)
+_GUNNER_SCORE_GROUPS = _build_score_groups(GUNNER_BUILDING_SCORE, _step_bits_tuple)
 
 _THREAT_PENALTY_BITS = _bits_of(THREAT_PENALTY)
 _SENT_CORE_BITS = _bits_of(SENTINEL_BUILDING_SCORE[map_info._IDX_CORE])
@@ -315,11 +306,12 @@ def _add_planes_into(dst, src):
         carry = (a & b) | (carry & (a ^ b))
 
 
-def _read_score(planes, tile_n):
-    """Read the integer score stored at `tile_n` across the planes."""
+def _read_score(planes, tile_bit):
+    """Read the integer score stored at the tile whose bit is `tile_bit` (a
+    single-bit mask, not an index)."""
     score = 0
     for i in range(_NUM_PLANES):
-        if (planes[i] >> tile_n) & 1:
+        if planes[i] & tile_bit:
             score |= 1 << i
     return score
 
@@ -628,10 +620,7 @@ def get_best_direction(pos):
     friendly "good" conveyors are less likely to be sacrificed for
     low-value attacks."""
     
-    w = map_info._width
-    px, py = pos.x, pos.y
-    n = px + py * w
-    bit = 1 << n
+    bit = 1 << (pos.x + pos.y * map_info._width)
 
     _ensure_sentinel_planes()
     _ensure_gunner_scores()
@@ -647,7 +636,7 @@ def get_best_direction(pos):
     for d in range(8):
         if not (sentinel_masks[d] & bit):
             continue
-        s = _read_score(sent_planes_by_dir[d], n)
+        s = _read_score(sent_planes_by_dir[d], bit)
         if s > best_s_score:
             best_s_score = s
             best_s_dir = directions[d]
@@ -657,7 +646,7 @@ def get_best_direction(pos):
     for d in range(8):
         if not (gunner_masks[d] & bit):
             continue
-        s = _read_score(gun_planes_by_dir[d], n)
+        s = _read_score(gun_planes_by_dir[d], bit)
         if s > best_g_score:
             best_g_score = s
             best_g_dir = directions[d]
@@ -970,7 +959,7 @@ def score():
     _GUN_CORE_BITS_BY_STEP = _step_bits_tuple(GUNNER_BUILDING_SCORE[core])
     global _cached_claims
     _cached_claims = _my_claims()
-    return 9 if _cached_claims else 0
+    return MAX_SCORE if _cached_claims else 0
 
 
 def _try_instant_preferred(candidates: int) -> bool:
@@ -1146,8 +1135,7 @@ def _try_launcher_lockdown(target: Position) -> bool:
 
     if not options:
         return False
-    options.sort(key=lambda o: (-o[0], -o[1]))
-    delta, _, kind, best_p, best_lsb = options[0]
+    delta, _, kind, best_p, best_lsb = min(options, key=lambda o: (-o[0], -o[1]))
 
     if (best_lsb & my_barrier) and rc.can_destroy(best_p):
         rc.destroy(best_p)

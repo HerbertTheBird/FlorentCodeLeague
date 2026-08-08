@@ -1,76 +1,41 @@
-# --- pay as you go ------------------------------------------------------------
-# harvest and route both quote the *entire* remaining conveyor chain up front and
-# refuse the project unless all of it is affordable this turn. That silently caps
-# how far from our network a harvester can ever be built, and it is why our
-# economy stays small: across five games against sporks we finish on 145
-# conveyors and 22 harvesters to their 490 and 46.
-#
-# Quoting only the next few hops fixes it. A conveyor laid this turn is useful
-# next turn whether or not the rest of the chain exists, and route picks the dead
-# end up and extends it.
-#
-# Swept against Champion_v45 over all 33 maps, both sides. The horizon has a
-# plateau, not a threshold -- too short is worse than not doing it at all,
-# because the builder commits to chains it cannot finish:
-#
-#     3   42.4%      10  60.6%
-#     5   40.9%      11  54.5%
-#     8   56.1%      12  48.5%
-#     9   51.5%      16  42.4%
-#                    unbounded (v45) is the 50.0% baseline
-#
-# 8-11 are all above the baseline and 3/5/12/16 are all below, so the plateau is
-# supported by 264 matches rather than by the single best cell; 10 is the argmax
-# and sits in the middle of it, but read 60.6% as the top of a noisy peak whose
-# true value is nearer the ~55% the plateau averages.
-#
-# The effect on the maps we were losing is not marginal. saga -- 1-21 on the
-# ladder, our worst map by a wide margin -- goes from a loss at turn 144 on 34
-# conveyors and 750 Ti to a *win* at turn 487 on 101 conveyors and 4500 Ti.
-# hive goes 26 -> 97 conveyors and 1890 -> 4480 Ti. heart is the exception and
-# builds slightly fewer (42 -> 37); it still wins.
-#
-# Both call sites must use the same horizon: harvest quotes harvester + chain and
-# route quotes chain alone, and a harvester admitted under one budget whose chain
-# is refused under the other is the stranded-harvester case this is meant to fix.
-PAYG_HORIZON = 10
+# Route extends our conveyor network one hop at a time: it picks up a dead end
+# (or an orphaned harvester) and lays the next conveyor toward the accepting
+# network, quoting only PAYG_HORIZON hops rather than the whole remaining chain.
+# See _config.PAYG_HORIZON.
+from _config import PAYG_HORIZON
 from main import has_op
 import map_info
 import pathing
 from pathing import Pathing
 from fcode import *
 import units.builder
+import payg
 import comms
 from log import log
-import sys
+
 rc: Controller = None
 nav: Pathing = None
 _cost_map: dict[int, tuple[int, int]] = {}  # tile index -> (min titanium cost, round recorded)
-COST_MAP_TTL = 100
 
 UNPATHABLE_TTL = 40
 _unpathable: dict[int, int] = {}   # tile index -> round recorded
+
+# Conveyors face cardinals only and can only be built on a cardinally adjacent
+# tile, so a reconstructed route step is always one of these four -- plus (0, 0),
+# which bfs_route returns when the start tile is already a target and which maps
+# to CENTRE so the build below simply fails.
+_DIR_BY_DELTA = {
+    (0, -1): Direction.NORTH,
+    (0, 1): Direction.SOUTH,
+    (-1, 0): Direction.WEST,
+    (1, 0): Direction.EAST,
+    (0, 0): Direction.CENTRE,
+}
 
 def init(c: Controller):
     global rc, nav
     rc = c
     nav = units.builder.nav
-def _too_expensive():
-    """Bitmask of tiles we know we can't afford right now."""
-    ti = rc.get_global_resources()
-    current = rc.get_current_round()
-    result = 0
-    stale = []
-    for n, (cost, turn) in _cost_map.items():
-        if turn + COST_MAP_TTL < current:
-            stale.append(n)
-            continue
-        log("cost of", n%map_info._width, n//map_info._width, cost)
-        if cost > ti:
-            result |= 1 << n
-    for n in stale:
-        del _cost_map[n]
-    return result
 
 def _mark_unpathable(mask: int):
     """Record every tile in `mask` as unroutable as of this round."""
@@ -96,9 +61,6 @@ def _unpathable_mask():
     return result
 
 
-def _dead_end_conveyors():
-    """Bitmask of routable conveyors whose output is not connected to my ore-accepting network."""
-    return map_info._bm_dead_end & ~map_info._bm_enemy_turret_threat
 def not_blocked():
     '''
     it is not blocked if
@@ -123,47 +85,49 @@ def not_blocked():
         & ~map_info._bm_et[map_info._IDX_CONVEYOR])
     )
     already_routed = map_info.expand_manhattan(my_connected) | left_conveyors | right_conveyors | up_conveyors | down_conveyors
-    bottom_row = ((1 << w) - 1) << (w * (map_info._height - 1))
-    top_row = (1 << w) - 1
     blocked = (
         (((blocking & map_info._not_left_col) >> 1) | ~map_info._not_right_col)
         & (((blocking & map_info._not_right_col) << 1) | ~map_info._not_left_col)
-        & ((blocking >> w) | bottom_row)
-        & ((blocking << w) | top_row)
+        & ((blocking >> w) | map_info._bottom_row)
+        & ((blocking << w) | map_info._top_row)
     )
     return map_info._board_mask & ~already_routed & ~blocked & ~map_info._bm_enemy_turret_threat
 
-def _orphan_harvesters(not_blocked_mask: int):
-    # Was unmasked by team, so ENEMY harvesters entered route's candidate set --
-    # and route (5) outranks harvest (4), heal (3), disrupt (2) and explore (1),
-    # so every such turn outranked our own economy. Measured against loki: enemy
-    # harvesters present in the mask on 528/614/753 builder-turns on
-    # saga/jackpot/hive, and actually selected as the build target 11-15 times
-    # a game.
-    my_harvesters = map_info._bm_et[map_info._IDX_HARVESTER] & map_info._bm_team[map_info._my_team_idx]
-    if not my_harvesters:
-        return 0
-    return my_harvesters & not_blocked_mask
-
 def cant_claim():
-    w = map_info._width
     my_pos = map_info._my_pos
-    my_bit = 1 << (my_pos.x + my_pos.y * w)
-    cant = map_info._bm_others_3x3 & ~map_info.expand_chebyshev(my_bit)
-    return cant
+    my_bit = 1 << (my_pos.x + my_pos.y * map_info._width)
+    return map_info._bm_others_3x3 & ~map_info.expand_chebyshev(my_bit)
 
 def _my_claims():
-    w = map_info._width
-    my_mask = 1 << (map_info._my_pos.x + map_info._my_pos.y * w)
-    avoid = _too_expensive() | cant_claim() | _unpathable_mask()
-    not_blocked_mask = not_blocked()
-    candidates = (
-        _dead_end_conveyors()
-        | _orphan_harvesters(not_blocked_mask)
-    ) & ~avoid
+    my_pos = map_info._my_pos
+    my_mask = 1 << (my_pos.x + my_pos.y * map_info._width)
+
+    # Routable conveyors whose output is not connected to my ore-accepting network.
+    candidates = map_info._bm_dead_end & ~map_info._bm_enemy_turret_threat
+
+    # Orphaned harvesters, masked to my team. Was unmasked, so ENEMY harvesters
+    # entered route's candidate set -- and route (5) outranks harvest (4), heal
+    # (3), disrupt (2) and explore (1), so every such turn outranked our own
+    # economy. Measured against loki: enemy harvesters present in the mask on
+    # 528/614/753 builder-turns on saga/jackpot/hive, and actually selected as
+    # the build target 11-15 times a game.
+    my_harvesters = map_info._bm_et[map_info._IDX_HARVESTER] & map_info._bm_team[map_info._my_team_idx]
+    if my_harvesters:
+        candidates |= my_harvesters & not_blocked()
+
     if units.builder._stay_near_core:
         candidates &= units.builder.near_core_mask()
-    return pathing.claim_subset(my_mask, map_info._bm_friendly_bots, candidates, tie_self=True)
+    # Route has the highest MAX_SCORE, so this runs first for every builder on
+    # every turn -- including the many with no dead end anywhere. Don't pay for
+    # the reject sets until we know there is something to reject.
+    if not candidates:
+        return 0
+    avoid = (
+        payg.too_expensive(_cost_map, rc.get_global_resources(), rc.get_current_round())
+        | cant_claim()
+        | _unpathable_mask()
+    )
+    return pathing.claim_subset(my_mask, map_info._bm_friendly_bots, candidates & ~avoid, tie_self=True)
 
 _cached_claims = 0
 
@@ -172,7 +136,7 @@ def score():
     global _cached_claims
     units.builder.draw_mask(map_info._bm_dead_end, 0, 0, 255)
     _cached_claims = _my_claims()
-    return 5 if _cached_claims else 0
+    return MAX_SCORE if _cached_claims else 0
 
 def run():
     log("ROUTE")
@@ -181,10 +145,12 @@ def run():
         log("no candidates?")
         return
     width = map_info._width
+    my_team_bm = map_info._bm_team[map_info._my_team_idx]
+    # Priced before any destroy, which would lower the build scale, so the
+    # candidate-loop gate and the destroy gate below quote the same number.
+    need = rc.get_conveyor_cost() + map_info.ti_reserve()
 
-    best = None
-    target_conveyor = [None] * 2
-
+    target = None
     while candidates:
         candidate, _ = nav.closest(candidates)
         if candidate is None:
@@ -208,55 +174,58 @@ def run():
             continue
 
         tc0 = cand_path[0]
-        occupant = map_info.type_at(tc0.x, tc0.y)
-        # If an enemy building sits on the tile we'd route through we can't path
-        # here — we don't attack it. Skip this candidate and try the next rather
-        # than returning: `_bm_dead_end` includes the target tile of our own
-        # conveyor pointing into an enemy building, and bailing outright meant a
-        # bot whose closest candidate was such a tile re-picked it every round
-        # and did nothing for as long as that building stood.
-        if occupant is not None and map_info.team_at(tc0.x, tc0.y) != map_info._my_team:
-            _mark_unpathable(cand_bit)
-            candidates &= ~cand_bit
-            continue
-        # A tile that already holds one of our buildings — the hard_block
-        # re-orient case, our conveyor whose output can neither accept titanium
-        # nor be built on — must be destroyed before it can be re-laid, and the
-        # destroy is gated on the spawn reserve. Quote that here instead of
-        # discovering it inside attempt_build, where failing the gate leaves the
-        # conveyor standing, makes can_build_conveyor False, and burns the turn
-        # on a candidate we could never act on — every turn, until titanium
-        # recovers past the flat 40 Ti reserve.
-        if occupant is not None and rc.get_global_resources() < rc.get_conveyor_cost() + map_info.ti_reserve():
-            log("destroy blocked by reserve")
-            candidates &= ~cand_bit
-            continue
+        tc0_n = tc0.x + tc0.y * width
+        if map_info._building_et_idx[tc0_n] >= 0:
+            # If an enemy building sits on the tile we'd route through we can't
+            # path here — we don't attack it. Skip this candidate and try the
+            # next rather than returning: `_bm_dead_end` includes the target tile
+            # of our own conveyor pointing into an enemy building, and bailing
+            # outright meant a bot whose closest candidate was such a tile
+            # re-picked it every round and did nothing for as long as that
+            # building stood.
+            if not (my_team_bm >> tc0_n) & 1:
+                _mark_unpathable(cand_bit)
+                candidates &= ~cand_bit
+                continue
+            # A tile that already holds one of our buildings — the hard_block
+            # re-orient case, our conveyor whose output can neither accept
+            # titanium nor be built on — must be destroyed before it can be
+            # re-laid, and the destroy is gated on the spawn reserve. Quote that
+            # here instead of discovering it after the pick, where failing the
+            # gate leaves the conveyor standing, makes can_build_conveyor False,
+            # and burns the turn on a candidate we could never act on — every
+            # turn, until titanium recovers past the flat 40 Ti reserve.
+            if rc.get_global_resources() < need:
+                log("destroy blocked by reserve")
+                candidates &= ~cand_bit
+                continue
 
-        best = candidate
-        target_conveyor = [cand_path[0], cand_path[1]]
+        target = (tc0, cand_path[1], cand_path[2])
         break
 
-    if best is None:
+    if target is None:
         return
 
-    def attempt_build():
-        destroy = target_conveyor[0]
-        nxt = target_conveyor[1]
-        cost = rc.get_conveyor_cost() + map_info.ti_reserve()
-        if rc.can_destroy(destroy) and has_op() and rc.get_global_resources() >= cost:
-            rc.destroy(destroy)
-            map_info.update_at(destroy)
-        direction = map_info.direction_to(destroy, nxt)
-        if rc.can_build_conveyor(destroy, direction):
-            rc.build_conveyor(destroy, direction)
-            map_info.update_at(destroy)
-            return True
-        return False
+    destroy, nxt, seg_dist = target
+    # `need` is only known to be covered on the branch that found a building
+    # here, and can_destroy is engine truth about a tile we may remember as empty.
+    if rc.can_destroy(destroy) and has_op() and rc.get_global_resources() >= need:
+        rc.destroy(destroy)
+        map_info.update_at(destroy)
 
-    built = attempt_build()
-    # cand_path[2] is the segment distance from the routed source to the accepting
+    direction = _DIR_BY_DELTA.get((nxt.x - destroy.x, nxt.y - destroy.y))
+    if direction is None:
+        # bfs_route only ever steps cardinally; belt and braces.
+        direction = map_info.direction_to(destroy, nxt)
+    built = False
+    if rc.can_build_conveyor(destroy, direction):
+        rc.build_conveyor(destroy, direction)
+        map_info.update_at(destroy)
+        built = True
+
+    # seg_dist is the segment distance from the routed source to the accepting
     # network; a distance-1 segment built now is the last hop, so the route is
     # fully connected this turn. Report it so the core can tally completions.
-    if built and cand_path[2] == 1:
+    if built and seg_dist == 1:
         comms.note_route_complete()
-    nav.move_adjacent(target_conveyor[0])
+    nav.move_adjacent(destroy)
