@@ -1296,6 +1296,7 @@ def _compute_route_targets() -> int:
     mask = loaded_sources
     while mask:
         lsb = mask & -mask
+        mask ^= lsb
         n = lsb.bit_length() - 1
         tn = conv_target[n]
         # update_at stores conv_target without bounds-checking the target, so a
@@ -1304,8 +1305,9 @@ def _compute_route_targets() -> int:
         # its ENTIRE turn for as long as the conveyor exists and is observed
         # loaded. Probed reachable: can_build_conveyor(Position(2,0), NORTH)
         # returns True and the build succeeds. _conv_output_mask already guards
-        # this exact value; these two call sites did not.
-        if tn < 0 or tn >= _width * _height:
+        # this exact value; so do both conv_target reads in this function (here
+        # and in the reaches_core walk below).
+        if tn < 0 or tn >= tiles:
             continue
         tbit = 1 << tn
         if hard_block & tbit:
@@ -1314,7 +1316,6 @@ def _compute_route_targets() -> int:
             dead_ends |= tbit
         elif (bm_my & lsb) and (enemy_hard & tbit):
             dead_ends |= tbit
-        mask ^= lsb
     _bm_dead_end = dead_ends
 
     # --- Overlay loaded/visible state on top of the structural conveyor graph.
@@ -1329,7 +1330,7 @@ def _compute_route_targets() -> int:
         for n in reaches_core_order:
             lsb = 1 << n
             p = conv_target[n]
-            if p >= 0 and (reaches_core & (1 << p)):
+            if 0 <= p < tiles and (reaches_core & (1 << p)):
                 p_loaded = run_loaded_arr[p]
                 p_visible = run_visible_arr[p] if run_visible_arr is not None else 0
             else:
