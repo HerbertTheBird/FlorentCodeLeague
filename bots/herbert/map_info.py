@@ -188,6 +188,13 @@ _building_conv_target: list[int] = []
 
 _conv_reverse: list[int] = []   # reverse[tn] = bitmask of conveyor-type buildings (either team) with any output to tile tn
 
+# Hop distance from each of my conveyors to my core along the belt: 1 = points
+# into the core, 2 = points into a conveyor that points into the core, etc.
+# -1 for any tile that isn't one of my conveyors connected to the core (walls,
+# empty tiles, enemy convs, and my convs whose chain never reaches the core).
+# Rebuilt by `_compute_route_reaches_core()` (gated on `_struct_version`).
+conv_dist_core: list[int] = []
+
 # Bitmask lists indexed by _ET_INT / _TM_INT / _ENV_INT
 _bm_et: list[int] = []      # one bitmask per EntityType
 _bm_team: list[int] = []    # one bitmask per Team
@@ -204,8 +211,21 @@ _bm_my_core_area: int = 0       # my core 2x2 (update only in update)
 _bm_their_core_area: int = 0    # enemy core 2x2
 _bm_enemy_launch_adj: int = 0   # tiles adjacent to enemy launchers (update only in update)
 _bm_route_targets: int = 0      # tiles route state can path toward (update only in update)
+_bm_reaches_core: int = 0       # TEMP/debug: my conveyors whose chain reaches my core
+_bm_loaded_run: int = 0         # TEMP/debug: the loaded 4+ run tiles only (no chain flood)
 _bm_conv_ti: int = 0            # conveyors observed containing titanium
 _bm_ti_carrying: int = 0       # conveyors believed to carry titanium (within 3 up/downstream of an observed ti conveyor)
+# Per-conveyor "load" = 1 / (spacing of titanium along the belt), in [0, 1].
+# For a conveyor that has ti: 1 / (hops DOWNSTREAM to the next ti conveyor).
+# For a conveyor without ti: 1 / (hops up to nearest ti + hops down to nearest
+# ti) -- the gap it sits in. 0.0 where undefined (no conveyor, or no downstream
+# ti reference). Rebuilt by `_compute_conv_load()` off the conv_target chain.
+conv_load: list[float] = []
+# The same load split into four bitmask buckets by quartile, so callers can score
+# it with bit ops instead of looping. Index k-1 holds the conveyors whose load
+# rounds up into quartile k: [0]=(0,1/4], [1]=(1/4,1/2], [2]=(1/2,3/4], [3]=(3/4,1].
+# Load 0 is in no bucket. Bucket k == ceil(load*4).
+conv_load_buckets: list[int] = [0, 0, 0, 0]
 _bm_dead_end: int = 0           # possible places to route from, defined by the targets of any conveyor types heading into nothing or a building that is not a (conveyor type, my core, my sentinel, or my gunner). also includes my conveyors pointing into an enemy building (update only in update)
 _bm_my_gunner_claims: int = 0     # tiles already covered by one of my gunners' current ray (update only in update)
 _bm_conv_by_dir: list[int] = [0] * 8  # per facing: CONVEYOR tiles with that direction
@@ -1028,6 +1048,7 @@ def init(c: Controller):
     global _prev_pos, _my_pos
     global _my_team, _my_team_idx
     global _building_id, _building_et_idx, _building_hp, _building_dir, _building_conv_target, _conv_reverse
+    global conv_dist_core, conv_load, conv_load_buckets
     global _bm_et, _bm_team, _bm_env
     global _left_col, _right_col, _bottom_row, _top_row, _not_left_col, _not_right_col, _not_bottom_row, _not_top_row
     global _board_mask, _bm_dir
@@ -1052,6 +1073,9 @@ def init(c: Controller):
     _building_dir         = [-1] * tiles
     _building_conv_target = [-1] * tiles
     _conv_reverse         = [0] * tiles
+    conv_dist_core        = [-1] * tiles
+    conv_load             = [0.0] * tiles
+    conv_load_buckets     = [0, 0, 0, 0]
 
     _bm_et   = [0] * _NUM_ET
     _bm_team = [0] * _NUM_TEAM
@@ -1302,7 +1326,7 @@ _route_reaches_core_cache: tuple[int, list[int]] = (0, [])
 
 
 def _compute_route_reaches_core() -> tuple[int, tuple[int, ...]]:
-    global _route_reaches_core_cache_version, _route_reaches_core_cache
+    global _route_reaches_core_cache_version, _route_reaches_core_cache, conv_dist_core
     if _struct_version == _route_reaches_core_cache_version:
         return _route_reaches_core_cache
 
@@ -1310,6 +1334,8 @@ def _compute_route_reaches_core() -> tuple[int, tuple[int, ...]]:
     reverse = _conv_reverse
     reaches_core = 0
     order: list[int] = []
+    # Per-tile hop distance to core, filled in as the BFS peels off each layer.
+    dist = [-1] * (_width * _height)
 
     layer = 0
     c_mask = _bm_my_core_area
@@ -1320,8 +1346,12 @@ def _compute_route_reaches_core() -> tuple[int, tuple[int, ...]]:
         c_mask ^= lsb
 
     # Single walk per layer: append to `order` and accumulate `next_layer`
-    # in the same LSB-extraction loop, instead of two separate passes.
+    # in the same LSB-extraction loop, instead of two separate passes. Each
+    # layer is one more hop from the core, so `hop` is the distance stored in
+    # `dist`; the `& ~reaches_core` below keeps the first (shortest) hop a tile
+    # is reached at.
     order_append = order.append
+    hop = 1
     while layer:
         reaches_core |= layer
         next_layer = 0
@@ -1330,10 +1360,13 @@ def _compute_route_reaches_core() -> tuple[int, tuple[int, ...]]:
             lsb = m & -m
             n = lsb.bit_length() - 1
             order_append(n)
+            dist[n] = hop
             next_layer |= reverse[n]
             m ^= lsb
         layer = next_layer & my_convs & ~reaches_core
+        hop += 1
 
+    conv_dist_core = dist
     # Cache as list — callers only iterate, no need to pay for tuple().
     result = (reaches_core, order)
     _route_reaches_core_cache_version = _struct_version
@@ -1379,7 +1412,7 @@ def _compute_route_targets() -> int:
     # and `_recompute_derived_loaded` refreshes it before route runs.
     loaded_union = _bm_ti_carrying
     visible_loaded_mine = my_convs & loaded_union & _bm_visible
-    global _bm_dead_end
+    global _bm_dead_end, _bm_reaches_core, _bm_loaded_run
     global _route_targets_cache_key, _route_targets_cache
     # Seeds for the DEAD_END_LOOKAHEAD walk below. Both are visibility-gated, so
     # they belong in the cache key: `visible_loaded_mine` does not move when only
@@ -1477,12 +1510,22 @@ def _compute_route_targets() -> int:
 
     # --- Overlay loaded/visible state on top of the structural conveyor graph.
     reaches_core, reaches_core_order = _compute_route_reaches_core()
-    loaded_mine = my_convs & loaded_union
+    _bm_reaches_core = reaches_core          # TEMP/debug export
+    # Saturation ("loaded run of 4+") counts OBSERVED titanium on consecutive
+    # conveyors, not the ±3 believed-carry set: a real jam holds ti on adjacent
+    # conveyors, whereas believed-carry bridges spaced-out stacks into a phantom
+    # continuous run (the glacierkeep false positive). conv_load is not used here
+    # either -- being downstream-only, it zeroes a jam's last tile and would make
+    # the run length off by one. The dead-end/seed logic above keeps the smoothed
+    # believed set on purpose.
+    loaded_mine = my_convs & _bm_conv_ti
+    run_visible_mine = loaded_mine & _bm_visible
     unroutable = 0
+    _bm_loaded_run = 0                        # TEMP/debug
     if loaded_mine:
         run_loaded_arr = [0] * tiles
         ext_roots = 0
-        run_visible_arr = [0] * tiles if visible_loaded_mine else None
+        run_visible_arr = [0] * tiles if run_visible_mine else None
 
         for n in reaches_core_order:
             lsb = 1 << n
@@ -1498,7 +1541,7 @@ def _compute_route_targets() -> int:
                 run_loaded_arr[n] = rl
             else:
                 rl = 0
-            if run_visible_arr is not None and (visible_loaded_mine & lsb):
+            if run_visible_arr is not None and (run_visible_mine & lsb):
                 rv = p_visible + 1
                 run_visible_arr[n] = rv
                 if rv >= 4:
@@ -1515,6 +1558,7 @@ def _compute_route_targets() -> int:
                     unroutable |= lsb
 
         # builder.draw_mask(unroutable, 255, 0, 0)
+        _bm_loaded_run = unroutable           # TEMP: loaded 4+ run only, before chain flood
 
         # --- A visible 4-run jams the full chain: extend through all my conveyors
         # both upstream and downstream from each ext_root.
@@ -1635,6 +1679,81 @@ def _recompute_derived_structural() -> None:
     _bm_passable_FFF = _board_mask & ~(_bm_blocked | _bm_enemy_launch_adj)
 
 
+def _compute_conv_load() -> None:
+    """Fill `conv_load[n]` = 1 / titanium spacing along the belt at conveyor n.
+
+    Two reference points define a conveyor's spacing:
+      * a conveyor that HAS ti -> distance DOWNSTREAM to the next ti conveyor
+        (look downstream only, per design -- one point is itself);
+      * a conveyor WITHOUT ti  -> (hops up to nearest ti) + (hops down to nearest
+        ti), the gap it sits between.
+
+    Computed entirely off the single-valued `conv_target` (downstream) chain: the
+    nearest-upstream-ti distance comes from one forward propagation out of the ti
+    seeds, the downstream distance from a short forward walk -- no branching
+    reverse walk. 0.0 where undefined (not a conveyor, or no ti reference found
+    within the chain)."""
+    global conv_load, conv_load_buckets
+    tiles = _width * _height
+    conv_load = [0.0] * tiles
+    conv_load_buckets = [0, 0, 0, 0]
+    convs = _bm_conveyors
+    if not convs:
+        return
+    ti = _bm_conv_ti & convs
+    conv_target = _building_conv_target
+    INF = 1 << 30
+    cap = _width + _height          # cycle / range guard
+
+    # A[n] = hops to the nearest ti conveyor at-or-upstream of n (0 if n has ti),
+    # via forward relaxation from the ti seeds along conv_target.
+    A = [INF] * tiles
+    frontier = []
+    m = ti
+    while m:
+        lsb = m & -m
+        n = lsb.bit_length() - 1
+        m ^= lsb
+        A[n] = 0
+        frontier.append(n)
+    steps = 0
+    while frontier and steps < cap:
+        nxt = []
+        for n in frontier:
+            t = conv_target[n]
+            if 0 <= t < tiles and (convs >> t) & 1 and A[n] + 1 < A[t]:
+                A[t] = A[n] + 1
+                nxt.append(t)
+        frontier = nxt
+        steps += 1
+
+    # For each conveyor: B = strict downstream hops to the next ti conveyor.
+    m = convs
+    while m:
+        lsb = m & -m
+        n = lsb.bit_length() - 1
+        m ^= lsb
+        has_ti = (ti >> n) & 1
+        a = 0 if has_ti else A[n]        # upstream reference (0 for a ti tile)
+        b = INF
+        cur = conv_target[n]
+        d = 1
+        while 0 <= cur < tiles and (convs >> cur) & 1 and d <= cap:
+            if (ti >> cur) & 1:
+                b = d
+                break
+            cur = conv_target[cur]
+            d += 1
+        if has_ti:
+            dist = b                     # ti tile: downstream spacing only
+        else:
+            dist = a + b                 # empty tile: full gap it sits in
+        if 0 < dist < INF:
+            conv_load[n] = 1.0 / dist
+            bucket = -(-4 // dist)       # ceil(4 / dist) == ceil(load * 4), 1..4
+            conv_load_buckets[bucket - 1] |= 1 << n
+
+
 def _recompute_derived_loaded() -> None:
     global _bm_ti_carrying
     global _recompute_loaded_cache_key
@@ -1645,6 +1764,7 @@ def _recompute_derived_loaded() -> None:
     _recompute_loaded_cache_key = key
 
     _bm_ti_carrying = _compute_carrying()
+    _compute_conv_load()
 
 
 def _recompute_derived_visible() -> None:
@@ -1710,6 +1830,34 @@ def update(recompute: bool = True) -> None:
             bm_visible |= bit
             update_at(tile)
         _bm_visible = bm_visible
+
+    # Invalidate a symmetry the moment we can SEE the tile where it says the enemy
+    # core must sit and there is no enemy core there. Cores never move or appear,
+    # so a predicted core footprint that we've seen and that isn't an enemy core
+    # (or that falls off the board) is a definitive disproof. This catches what
+    # mirrored-terrain checks cannot -- e.g. a horizontally-centred core whose
+    # horizontal flip lands on our OWN base, which otherwise "solves" to the enemy
+    # core sitting on ours and makes cut wall in our own base.
+    if _my_core is not None and not _solved_sym:
+        _enemy_core_bm = _bm_et[_IDX_CORE] & _bm_team[1 - my_team_idx]
+
+        def _core_spot_ruled_out(corner) -> bool:
+            for dx in (0, 1):
+                for dy in (0, 1):
+                    tx, ty = corner.x + dx, corner.y + dy
+                    if not (0 <= tx < width and 0 <= ty < height):
+                        return True                       # would fall off the board
+                    b = 1 << (tx + ty * width)
+                    if (_bm_seen & b) and not (_enemy_core_bm & b):
+                        return True                       # seen, and not an enemy core
+            return False
+
+        if _hor_sym and _core_spot_ruled_out(hor_flip_core(_my_core)):
+            _hor_sym = False
+        if _ver_sym and _core_spot_ruled_out(ver_flip_core(_my_core)):
+            _ver_sym = False
+        if _rot_sym and _core_spot_ruled_out(rot_flip_core(_my_core)):
+            _rot_sym = False
 
     possible_syms = int(_hor_sym) + int(_ver_sym) + int(_rot_sym)
     if possible_syms == 1 and not _solved_sym:
@@ -1777,8 +1925,13 @@ def update(recompute: bool = True) -> None:
                         log("Tiebreaking enemy core sym - VERTICAL")
                 elif _ver_sym:
                     _predicted_enemy_core = vsym_core
-                else:
+                elif _hor_sym:
                     _predicted_enemy_core = hsym_core
+                else:
+                    # Every symmetry has been ruled out (asymmetric map). Leave
+                    # the enemy core unknown rather than defaulting to the
+                    # horizontal flip, which on a centred core is our own base.
+                    _predicted_enemy_core = None
 
     # --- Update builder bot tracking ---
     _bm_friendly_bots = 0
