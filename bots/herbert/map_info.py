@@ -232,7 +232,6 @@ _bm_conv_by_dir: list[int] = [0] * 8  # per facing: CONVEYOR tiles with that dir
 _bm_enemy_turret_threat: int = 0 # tiles any enemy turret (sentinel/gunner) can shoot (update only in update)
 _bm_others_5x5: int = 0          # 5x5 around other friendly builder bots
 _bm_others_3x3: int = 0          # 3x3 around other friendly builder bots
-_bm_passable_FFF: int = 0        # cached (_board_mask & ~get_avoid(False)) — now genuinely equal to it, so search and movement share one graph
 
 # Structural state version — bumped on any structural map change (build/destroy
 # of a tracked building, or symmetry-solved insertion). Used to cheaply
@@ -656,33 +655,36 @@ _carrying_cache: int = 0
 
 
 def _carrying_expand(
-    seed, bm_conveyors, convs_e, convs_w, convs_s, convs_n,
-    reverse, conv_target, w, board, tiles,
-    not_left_col, not_right_col, not_top_row, not_bottom_row,
+    seed, bm_conveyors, reverse, harvesters, w, not_left_col, not_right_col,
 ):
     expanded = seed
-    # Upstream (reverse chain).
+    # Upstream (reverse chain). A carrying conveyor Y's feeder is also carrying
+    # ONLY when Y's titanium source is unambiguous: exactly one conveyor points
+    # into Y and no harvester sits beside Y. If two conveyors feed Y (either
+    # could be the carrier), or one conveyor plus a harvester adjacent to Y (the
+    # ti could be the harvester's), we can't attribute the load, so that branch
+    # stops. Observed-carrying conveyors are seeded directly, so this only gates
+    # the INFERRED upstream neighbours.
     cur = seed
     for _ in range(3):
-        not_expanded = ~expanded
-        conveyors_ne = bm_conveyors & not_expanded
-        nxt = (
-            ((cur & not_left_col) >> 1) & convs_e
-            | ((cur & not_right_col) << 1) & convs_w
-            | ((cur & not_top_row) >> w) & convs_s
-            | ((cur & not_bottom_row) << w) & convs_n
-        ) & bm_conveyors & not_expanded
+        nxt = 0
         m = cur
         while m:
             lsb = m & -m
-            n = lsb.bit_length() - 1
-            nxt |= reverse[n] & conveyors_ne
+            yn = lsb.bit_length() - 1
+            feeders = reverse[yn] & bm_conveyors
+            if feeders and (feeders & (feeders - 1)) == 0:      # exactly one feeder
+                adj = (((lsb & not_left_col) >> 1) | ((lsb & not_right_col) << 1)
+                       | (lsb >> w) | (lsb << w))
+                if not (adj & harvesters):                      # no alternative source
+                    nxt |= feeders & ~expanded
             m ^= lsb
         if not nxt:
             break
         expanded |= nxt
         cur = nxt
-    # Downstream (conv_target chain).
+    # Downstream (conv_target chain): whatever a carrying belt points into
+    # receives its titanium, so it carries too -- always unambiguous.
     cur = seed
     for _ in range(3):
         nxt = _conveyor_target_tiles(cur) & bm_conveyors & ~expanded
@@ -708,34 +710,72 @@ def _compute_carrying() -> int:
         _carrying_cache_key = key
         _carrying_cache = 0
         return 0
-    conv_target = _building_conv_target
     reverse = _conv_reverse
-    tiles = _width * _height
+    harvesters = _bm_et[_IDX_HARVESTER]
     w = _width
-    board = _board_mask
-    cardinal = (
-        _bm_et[_IDX_CONVEYOR]
-        | _bm_et[_IDX_SPLITTER]
-    )
-    dir_mask = _bm_dir
-    convs_e = cardinal & dir_mask[_DIR_E]
-    convs_w = cardinal & dir_mask[_DIR_W]
-    convs_s = cardinal & dir_mask[_DIR_S]
-    convs_n = cardinal & dir_mask[_DIR_N]
     nlc = _not_left_col
     nrc = _not_right_col
-    ntr = _not_top_row
-    nbr = _not_bottom_row
 
     ti_seed = _bm_conv_ti & bm_conveyors
     ti = (
-        _carrying_expand(ti_seed, bm_conveyors, convs_e, convs_w, convs_s, convs_n,
-                         reverse, conv_target, w, board, tiles, nlc, nrc, ntr, nbr)
+        _carrying_expand(ti_seed, bm_conveyors, reverse, harvesters, w, nlc, nrc)
         if ti_seed else 0
     )
     _carrying_cache_key = key
     _carrying_cache = ti
     return ti
+
+
+_end_cost_exempt_cache_version: int = -1
+_end_cost_exempt_cache: int = 0
+
+
+def end_cost_exempt_conveyors() -> int:
+    """Conveyors that point into our core, have NO conveyor feeding them, and NO
+    adjacent harvester.
+
+    Such a conveyor is an empty feed line straight into the core: routing onto it
+    just completes that line, so it should attach for free rather than paying the
+    conveyor end cost. Cached on `_struct_version`."""
+    global _end_cost_exempt_cache_version, _end_cost_exempt_cache
+    if _struct_version == _end_cost_exempt_cache_version:
+        return _end_cost_exempt_cache
+    _end_cost_exempt_cache_version = _struct_version
+
+    reverse = _conv_reverse
+    bm_conveyors = _bm_conveyors
+    my_convs = bm_conveyors & _bm_team[_my_team_idx]
+    harvesters = _bm_et[_IDX_HARVESTER]
+    w = _width
+    nlc = _not_left_col
+    nrc = _not_right_col
+
+    # Core-facing conveyors: our conveyors whose output is a core tile.
+    facers = 0
+    m = _bm_my_core_area
+    while m:
+        b = m & -m
+        m ^= b
+        n = b.bit_length() - 1
+        if n < len(reverse):
+            facers |= reverse[n]
+    facers &= my_convs
+
+    result = 0
+    m = facers
+    while m:
+        b = m & -m
+        m ^= b
+        yn = b.bit_length() - 1
+        if reverse[yn] & bm_conveyors:
+            continue                                  # something feeds it
+        adj = ((b & nlc) >> 1) | ((b & nrc) << 1) | (b >> w) | (b << w)
+        if adj & harvesters:
+            continue                                  # a harvester feeds it
+        result |= b
+
+    _end_cost_exempt_cache = result
+    return result
 
 
 def update_at(pos: Position) -> None:
@@ -1060,6 +1100,7 @@ def init(c: Controller):
     global _route_reaches_core_cache_version, _route_reaches_core_cache
     global _recompute_structural_cache_version, _recompute_loaded_cache_key, _recompute_visible_cache_key
     global _bot_pos, _bot_team, _bot_at, _bot_last_seen, _bot_pos_history
+    _avoid_cache.clear()
     _rc = c
     _my_team = _rc.get_team()
     _my_team_idx = _TM_INT[_my_team]
@@ -1608,12 +1649,21 @@ def _recompute_derived_structural() -> None:
     global _bm_enemy_launch_adj
     global _bm_enemy_turret_threat
     global _bm_my_gunner_claims, _bm_conv_by_dir
-    global _bm_passable_FFF
     global _recompute_structural_cache_version
 
     if _struct_version == _recompute_structural_cache_version:
         return
     _recompute_structural_cache_version = _struct_version
+
+    # The get_avoid cache keys on `_struct_version`, but its inputs include
+    # derived masks rebuilt right here (`_bm_conveyors`, `_bm_enemy_launch_adj`,
+    # ...). Between a struct bump in `update_at` and this recompute those derived
+    # masks lag the live ones (e.g. a fresh conveyor is already in
+    # `_bm_any_building` but not yet in `_bm_conveyors`), so a get_avoid call in
+    # that window caches a mask that (wrongly) treats the new conveyor as a solid
+    # building. Same `_struct_version`, so that stale entry would never expire.
+    # Drop the cache whenever the structural masks are rebuilt.
+    _avoid_cache.clear()
 
     width = _width
     height = _height
@@ -1634,17 +1684,18 @@ def _recompute_derived_structural() -> None:
     # conveyors and splitters are genuinely walk-through, and they are already
     # excluded below by never being added.
     #
-    # This matters far beyond `_bm_blocked` itself, because `_bm_passable_FFF`
-    # is derived from it and is the graph under every `nav.closest`,
-    # `nav.closest_within` and `pathing.claim_subset`. Movement, meanwhile, goes
-    # through `bfs_move`, which uses `get_avoid(False)` and gets it right. The
-    # two disagreeing is what let cut claim seal tiles it could never reach:
-    # `closest` reported the target four steps away straight through a barrier
-    # we had laid ourselves, `bfs_move` refused to take that step, and the state
-    # re-claimed the same tile every round (cut_walk_failed_reach4_seal=153 in a
-    # single instrumented game). On saga our own barriers sat inside
-    # `_bm_passable_FFF` on 819 of 981 builder-turns, up to 13 at once — exactly
-    # the map where we finish on fifteen barriers and lose.
+    # This matters beyond `_bm_blocked` itself: `passable()` (the graph under
+    # every `nav.closest`, `nav.closest_within` and `pathing.claim_subset`) is
+    # now `_board_mask & ~get_avoid(False)`, the SAME mask `bfs_move` moves on,
+    # so the two can no longer disagree. Previously they did — the closest-query
+    # graph called our own barriers free while `bfs_move` refused to step onto
+    # them — which let cut claim seal tiles it could never reach: `closest`
+    # reported the target four steps away straight through a barrier we had laid
+    # ourselves, `bfs_move` refused the step, and the state re-claimed the same
+    # tile every round (cut_walk_failed_reach4_seal=153 in a single instrumented
+    # game; on saga our own barriers sat in the closest-query graph on 819 of 981
+    # builder-turns, up to 13 at once — the map where we finish on fifteen
+    # barriers and lose). Sourcing both from get_avoid closes that gap.
     #
     # Note the core has to come from `_bm_my_core_area` rather than
     # `bm_et[_IDX_CORE] & bm_team[...]`: the 2x2 footprint is synthesised by
@@ -1676,7 +1727,6 @@ def _recompute_derived_structural() -> None:
     _bm_enemy_turret_threat = _compute_enemy_turret_threat()
     _bm_my_gunner_claims = _compute_my_gunner_claims()
     _bm_conv_by_dir = _compute_conv_by_dir()
-    _bm_passable_FFF = _board_mask & ~(_bm_blocked | _bm_enemy_launch_adj)
 
 
 def _compute_conv_load() -> None:
@@ -2039,17 +2089,42 @@ def is_passable(pos: Position):
     if _building_id[n] == 0: return True
     return bool((_bm_et[_IDX_CONVEYOR] | _bm_et[_IDX_SPLITTER]) & bit)
 
+_avoid_cache: dict = {}     # (is_route, enemy_pov) -> (key, mask)
+
+
 def get_avoid(is_route: bool, enemy_pov: bool = False) -> int:
     """Return a bitmask of tiles to avoid during pathfinding.
 
     Both modes avoid walls, both cores, and every building except conveyors.
       - is_route=False (builder movement): also avoids tiles adjacent to enemy
-        launchers.
+        launchers and enemy bots.
       - is_route=True (conveyor routing): also avoids all conveyors, all
         threatened tiles, the output targets of our own conveyors, and every
         non-landlocked ore.
     enemy_pov models the enemy's own pathing, so it drops the avoidances that are
-    ours alone (enemy-turret threat and enemy-launcher adjacency)."""
+    ours alone (enemy-turret threat and enemy-launcher/bot avoidance).
+
+    Cached per (is_route, enemy_pov) on the exact state each variant reads:
+    everything is struct-versioned except the routing landlocked/ore terms (which
+    track _bm_seen) and our own movement's enemy-bot avoidance (which tracks
+    _bm_enemy_bots). All three are constant within a unit's turn, so repeated
+    pathing calls hit the cache."""
+    ck = (is_route, enemy_pov)
+    if is_route:
+        key = (_struct_version, _bm_seen)
+    elif not enemy_pov:
+        key = (_struct_version, _bm_enemy_bots)
+    else:
+        key = _struct_version
+    hit = _avoid_cache.get(ck)
+    if hit is not None and hit[0] == key:
+        return hit[1]
+    mask = _compute_avoid(is_route, enemy_pov)
+    _avoid_cache[ck] = (key, mask)
+    return mask
+
+
+def _compute_avoid(is_route: bool, enemy_pov: bool) -> int:
     mask = _bm_env[_IDX_ENV_WALL]
     mask |= _bm_my_core_area | _bm_their_core_area
     mask |= _bm_any_building & ~_bm_conveyors
@@ -2072,5 +2147,13 @@ def get_avoid(is_route: bool, enemy_pov: bool = False) -> int:
             mask |= _bm_enemy_turret_threat
     elif not enemy_pov:
         mask |= _bm_enemy_launch_adj
-
+        mask |= _bm_enemy_bots
     return mask
+
+
+def passable() -> int:
+    """Tiles a builder can move onto: _board_mask & ~get_avoid(False). Replaces
+    the old cached _bm_passable_FFF, but is now sourced from get_avoid so it
+    stays consistent with the pathfinder (incl. enemy-bot avoidance and buildings
+    that only _bm_any_building tracks)."""
+    return _board_mask & ~get_avoid(False)

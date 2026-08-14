@@ -135,7 +135,7 @@ def _my_claims():
     )
     return pathing.claim_subset(my_mask, map_info._bm_friendly_bots, candidates & ~avoid, tie_self=True)
 
-_cached_claims = 0
+_cached_target = None        # (destroy, nxt, seg_dist) picked+validated in score()
 _cached_plan_action = None   # ("conveyor", pos, facing) | ("harvester", ore) | None
 
 
@@ -205,22 +205,58 @@ def _plan_next_action():
     return None
 
 
+def _find_route_target():
+    """First (destroy, nxt, seg_dist) among claimed candidates that is pathable
+    and affordable, or None -- computed in score() so route_repair isn't selected
+    when nothing is reachable."""
+    candidates = _my_claims()
+    if not candidates:
+        return None
+    width = map_info._width
+    my_team_bm = map_info._bm_team[map_info._my_team_idx]
+    need = rc.get_conveyor_cost() + map_info.ti_reserve()
+    while candidates:
+        candidate, _ = nav.closest(candidates)
+        if candidate is None:
+            _mark_unpathable(candidates)
+            return None
+        cand_n = candidate.x + candidate.y * width
+        cand_bit = 1 << cand_n
+        cand_is_harvester = bool(map_info._bm_et[map_info._IDX_HARVESTER] & cand_bit)
+        cand_path = nav.calculate_conveyor_path(candidate, update=not cand_is_harvester)
+        if cand_path is None:
+            _mark_unpathable(cand_bit)
+            candidates &= ~cand_bit
+            continue
+        cost = nav.conveyor_cost(min(cand_path[2], PAYG_HORIZON))
+        _cost_map[cand_n] = (cost, rc.get_current_round())
+        if rc.get_global_resources() < cost:
+            candidates &= ~cand_bit
+            continue
+        tc0 = cand_path[0]
+        tc0_n = tc0.x + tc0.y * width
+        if map_info._building_et_idx[tc0_n] >= 0:
+            if not (my_team_bm >> tc0_n) & 1:
+                _mark_unpathable(cand_bit)
+                candidates &= ~cand_bit
+                continue
+            if rc.get_global_resources() < need:
+                candidates &= ~cand_bit
+                continue
+        return (tc0, cand_path[1], cand_path[2])
+    return None
+
+
 MAX_SCORE = 8
 def score():
-    global _cached_claims, _cached_plan_action
-    # Building our own opening plan runs at route's normal tier -- "forced valid"
-    # while unbuilt, but not a max that overrides everything: attack (tier 9) can
-    # still preempt it when needed. It takes priority over route's dead-end
-    # routing (and, being tier 5, over harvest/heal), so skip the costlier claim
-    # scan while a plan is still going up.
+    global _cached_target, _cached_plan_action
     _cached_plan_action = _plan_next_action()
-    print(_cached_plan_action, rc.get_global_resources(), rc.get_harvester_cost())
     if _cached_plan_action is not None:
-        _cached_claims = 0
+        _cached_target = None
         return MAX_SCORE
     units.builder.draw_mask(map_info._bm_dead_end, 0, 0, 255)
-    _cached_claims = _my_claims()
-    return MAX_SCORE if _cached_claims else 0
+    _cached_target = _find_route_target()
+    return MAX_SCORE if _cached_target is not None else 0
 
 
 def _run_plan_action(action) -> None:
@@ -252,72 +288,12 @@ def run():
         _run_plan_action(_cached_plan_action)
         return
 
-    log("ROUTE")
-    candidates = _cached_claims
-    if not candidates:
-        log("no candidates?")
-        return
-    width = map_info._width
-    my_team_bm = map_info._bm_team[map_info._my_team_idx]
-    # Priced before any destroy, which would lower the build scale, so the
-    # candidate-loop gate and the destroy gate below quote the same number.
-    need = rc.get_conveyor_cost() + map_info.ti_reserve()
-
-    target = None
-    while candidates:
-        candidate, _ = nav.closest(candidates)
-        if candidate is None:
-            log("no closest???")
-            _mark_unpathable(candidates)
-            return
-        cand_n = candidate.x + candidate.y * width
-        cand_bit = 1 << cand_n
-        cand_is_harvester = bool(map_info._bm_et[map_info._IDX_HARVESTER] & cand_bit)
-        cand_path = nav.calculate_conveyor_path(candidate, update=not cand_is_harvester)
-        log("PATH", cand_path)
-        if cand_path is None:
-            _mark_unpathable(cand_bit)
-            candidates &= ~cand_bit
-            continue
-        cost = nav.conveyor_cost(min(cand_path[2], PAYG_HORIZON))
-        _cost_map[cand_n] = (cost, rc.get_current_round())
-        if rc.get_global_resources() < cost:
-            log("can't afford", cost)
-            candidates &= ~cand_bit
-            continue
-
-        tc0 = cand_path[0]
-        tc0_n = tc0.x + tc0.y * width
-        if map_info._building_et_idx[tc0_n] >= 0:
-            # If an enemy building sits on the tile we'd route through we can't
-            # path here — we don't attack it. Skip this candidate and try the
-            # next rather than returning: `_bm_dead_end` includes the target tile
-            # of our own conveyor pointing into an enemy building, and bailing
-            # outright meant a bot whose closest candidate was such a tile
-            # re-picked it every round and did nothing for as long as that
-            # building stood.
-            if not (my_team_bm >> tc0_n) & 1:
-                _mark_unpathable(cand_bit)
-                candidates &= ~cand_bit
-                continue
-            # A tile that already holds one of our buildings — the hard_block
-            # re-orient case, our conveyor whose output can neither accept
-            # titanium nor be built on — must be destroyed before it can be
-            # re-laid, and the destroy is gated on the spawn reserve. Quote that
-            # here instead of discovering it after the pick, where failing the
-            # gate leaves the conveyor standing, makes can_build_conveyor False,
-            # and burns the turn on a candidate we could never act on — every
-            # turn, until titanium recovers past the flat 40 Ti reserve.
-            if rc.get_global_resources() < need:
-                log("destroy blocked by reserve")
-                candidates &= ~cand_bit
-                continue
-
-        target = (tc0, cand_path[1], cand_path[2])
-        break
-
+    target = _cached_target      # (destroy, nxt, seg_dist), validated in score()
     if target is None:
         return
+    log("ROUTE")
+    width = map_info._width
+    need = rc.get_conveyor_cost() + map_info.ti_reserve()
 
     destroy, nxt, seg_dist = target
     # `need` is only known to be covered on the branch that found a building

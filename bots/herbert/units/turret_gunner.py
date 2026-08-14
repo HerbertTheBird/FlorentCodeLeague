@@ -5,33 +5,31 @@ import pathing
 from pathing import Pathing
 from log import log
 import units.turret_priority as turret_priority
+import units.states.attack as attack
 
 ONE_SHOT_HP = GameConstants.GUNNER_DAMAGE  # 7
+
+# Rotate to a different facing only when its attack.py score beats this. Same
+# scale as the placement scorer (GUNNER_BUILDING_SCORE et al.).
+ROTATE_SCORE_THRESHOLD = 26
 
 rc: Controller = None
 nav: Pathing = None
 my_pos: Position = None
 my_team: Team = None
 _attackable_by_dir: dict = {}
+# Each firing direction's ray as a bitmask (constant — a turret never moves),
+# plus their union and the longest ray length, used by _find_trap_rotation.
+_ray_mask_by_dir: dict = {}
+_ray_union: int = 0
+_max_ray_len: int = 0
 
 CARDINAL_OFFSETS = [(0, 1), (0, -1), (-1, 0), (1, 0)]
-
-# Sentinel-style weights. Builder bots are intentionally absent from rotation
-# scoring per spec — they're only valid as a *current-direction* fire target.
-_WEIGHTS = {
-    EntityType.CORE: 2,
-    EntityType.SENTINEL: 50,
-    EntityType.LAUNCHER: 10,
-    EntityType.HARVESTER: 0,
-    EntityType.GUNNER: 40,
-    EntityType.BARRIER: 5,
-    EntityType.SPLITTER: 3,
-    EntityType.CONVEYOR: 4,
-}
 
 
 def init(c: Controller):
     global rc, nav, my_pos, my_team, _attackable_by_dir
+    global _ray_mask_by_dir, _ray_union, _max_ray_len
     rc = c
     nav = Pathing(c)
     my_pos = rc.get_position()
@@ -40,6 +38,18 @@ def init(c: Controller):
         d: set(rc.get_attackable_tiles_from(my_pos, d, EntityType.GUNNER))
         for d in map_info._DIRECTIONS
     }
+    w = map_info._width
+    _ray_mask_by_dir = {}
+    _ray_union = 0
+    _max_ray_len = 0
+    for d, tiles in _attackable_by_dir.items():
+        m = 0
+        for p in tiles:
+            m |= 1 << (p.x + p.y * w)
+        _ray_mask_by_dir[d] = m
+        _ray_union |= m
+        if len(tiles) > _max_ray_len:
+            _max_ray_len = len(tiles)
 
 
 
@@ -123,56 +133,72 @@ def _decide_fire():
     return None if res is None else res[1]
 
 
-def _hp_at(tile: Position) -> int:
-    """HP of the entity that would be hit at `tile`. Mirrors `_scan_ray`'s
-    resolution: builder-bot wins over building."""
-    bot_id = rc.get_tile_builder_bot_id(tile)
-    if bot_id is not None:
-        return rc.get_hp(bot_id)
-    bid = rc.get_tile_building_id(tile)
-    if bid is None:
-        return 0
-    return rc.get_hp(bid)
-
-
-def _choose_rotate_dir():
-    """Pick the best direction to rotate toward by scoring each non-current
-    facing's first-obstruction tile through the shared turret priority logic.
-
-    Enemy builder bots are only considered as a rotation target when they
-    stand on one of *my* conveyors — that's the legacy "bot trespassing on my
-    line" fallback. They're routed through the bot pool in `select_best`,
-    which only fires after priorities 1-4 are exhausted."""
-    current = rc.get_direction()
-    w = map_info._width
-
-    candidates = []  # (tile, n, weight, hp, etype, direction)
-    for d in map_info._DIRECTIONS:
+def _best_scored_dir(current):
+    """Score every facing with attack.py's gunner reasoning and return the
+    (direction, score) of the best. Ties prefer the current facing, so we only
+    ever rotate when a DIFFERENT direction is strictly better."""
+    scores = attack.gunner_dir_scores_at(my_pos)   # [(Direction, score), ...]
+    best_dir = current
+    best_score = -1
+    for d, s in scores:
         if d == current:
-            continue
-        attackable = _attackable_by_dir[d]
-        res = _scan_ray(d, attackable,
-                        allow_builder_bots=True,
-                        bot_must_be_on_my_conveyor=True)
-        if res is None:
-            continue
-        etype, fire_at = res
-        weight = _WEIGHTS.get(etype, 0)
-        n = fire_at.x + fire_at.y * w
-        hp = _hp_at(fire_at)
-        candidates.append((fire_at, n, weight, hp, etype, d))
+            best_score = s
+            break
+    for d, s in scores:
+        if s > best_score:
+            best_dir, best_score = d, s
+    return best_dir, best_score
 
-    if not candidates:
-        return None
 
-    priority_sets = turret_priority.compute_priority_sets(rc)
-    chosen = turret_priority.select_best(
-        candidates, priority_sets, nav, ONE_SHOT_HP,
-        bot_ring_mode='off',
-    )
-    if chosen is None:
+def _find_trap_rotation():
+    """A trapped enemy builder: face the direction that pins it.
+
+    For each visible enemy builder bot, flood its reachable area on the enemy
+    movement graph (unknown tiles treated as passable — an unseen tile carries
+    no recorded wall/building, so it is open by default). If that whole area is
+    a closed region sitting entirely on ONE of our firing rays, the bot cannot
+    move off the line: return that direction so we rotate to pin it.
+
+    Only a fallback — run() calls this only when there is nothing to fire at and
+    no ordinary rotation target, so we never trade a real shot for a pin."""
+    enemy_bots = map_info._bm_enemy_bots
+    if not enemy_bots or not _ray_union:
         return None
-    return chosen[5]
+    current = rc.get_direction()
+
+    # Enemy movement graph. get_avoid(False, enemy_pov=True) blocks walls, both
+    # cores and non-conveyor buildings (incl. this gunner) but not enemy bots;
+    # unseen tiles carry no blocker, so they stay passable ("unknown passable").
+    passable = map_info._board_mask & ~map_info.get_avoid(False, enemy_pov=True)
+    passable |= enemy_bots  # a bot's own square / other enemy bots don't block it
+
+    bots = enemy_bots
+    while bots:
+        b = bots & -bots
+        bots ^= b
+        if not (b & _ray_union):
+            continue  # not even on a ray — cannot be pinned under one
+        # Flood the reachable region. Bail the moment it leaves the ray-union or
+        # grows past the longest ray: either way it cannot fit under one ray.
+        region = b
+        frontier = b
+        trapped = True
+        while frontier:
+            frontier = map_info.expand_manhattan(frontier) & passable & ~region
+            if not frontier:
+                break
+            region |= frontier
+            if (region & ~_ray_union) or region.bit_count() > _max_ray_len:
+                trapped = False
+                break
+        if not trapped:
+            continue
+        for d, m in _ray_mask_by_dir.items():
+            if d == current:
+                continue  # already facing it — no rotation needed
+            if region & ~m == 0 and m:
+                return d
+    return None
 
 
 def run():
@@ -181,14 +207,38 @@ def run():
     if rc.get_action_cooldown() > 0:
         return
 
+    rotate_cost = GameConstants.GUNNER_ROTATE_COST + GameConstants.GUNNER_AMMO_COST
+    current = rc.get_direction()
     fire_target = _decide_fire()
+
+    # Primary turn logic: score every facing with attack.py's reasoning and turn
+    # to the best if it clears the threshold and isn't where we already point.
+    # (Ties prefer current, so a good current target keeps us firing rather than
+    # spinning.) This can outrank firing a low-value target on the current ray --
+    # the score already credits the current facing's own ray, so we only turn
+    # away when another facing is genuinely better.
+    best_dir, best_score = _best_scored_dir(current)
+    if (best_score > ROTATE_SCORE_THRESHOLD and best_dir != current
+            and rc.get_global_resources() >= rotate_cost and rc.can_rotate(best_dir)):
+        rc.rotate(best_dir)
+        log(f"gunner rotated toward {best_dir} (score {best_score})")
+        return
+
     if fire_target is not None and rc.can_fire(fire_target):
         rc.fire(fire_target)
         log(f"gunner fired at {fire_target}")
         return
 
-    rotate_dir = _choose_rotate_dir()
-    if rotate_dir is not None and rc.get_global_resources() >= 60 and rc.can_rotate(rotate_dir):
-        rc.rotate(rotate_dir)
-        log(f"gunner rotated toward {rotate_dir}")
+    # Nothing worth turning to and nothing to shoot: as a last resort, pin a
+    # trapped enemy builder confined to a single ray (a guaranteed kill).
+    pin_dir = _find_trap_rotation()
+    if (pin_dir is not None
+            and rc.get_global_resources() >= rotate_cost and rc.can_rotate(pin_dir)):
+        rc.rotate(pin_dir)
+        log(f"gunner rotating to pin trapped builder toward {pin_dir}")
         return
+
+    # Truly idle -- nothing to shoot, no enemy bots, <= 2 enemy buildings in
+    # sight: this gunner's targets are gone, so recycle it.
+    if fire_target is None:
+        turret_priority.scrap_if_idle(rc)

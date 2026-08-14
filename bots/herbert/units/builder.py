@@ -18,6 +18,8 @@ import units.states.route    as route
 import units.states.route_repair   as route_repair
 import units.states.heal     as heal
 import units.states.attack   as attack
+import units.states.secure   as secure
+import units.states.chase    as chase
 import units.states.defend   as defend
 import units.states.cut      as cut
 import units.defense as defense
@@ -30,7 +32,7 @@ nav: Pathing = None
 
 # Sorted in descending order of max score to allow early break in selection loop
 states = tuple(sorted(
-    [explore, disrupt, harvest, harvest_repair, route, route_repair, heal, attack],
+    [explore, disrupt, harvest, harvest_repair, route, route_repair, heal, attack, secure, chase],
     key=lambda s: s.MAX_SCORE,
     reverse=True
 ))

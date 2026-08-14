@@ -78,7 +78,7 @@ GUNNER_BUILDING_SCORE[map_info._IDX_GUNNER] = 128
 GUNNER_BUILDING_SCORE[map_info._IDX_SENTINEL] = 64
 GUNNER_BUILDING_SCORE[map_info._IDX_LAUNCHER] = 32
 GUNNER_BUILDING_SCORE[map_info._IDX_CONVEYOR] = 16
-GUNNER_BUILDING_SCORE[map_info._IDX_BARRIER] = 22
+GUNNER_BUILDING_SCORE[map_info._IDX_BARRIER] = 26
 GUNNER_BUILDING_SCORE[map_info._IDX_SPLITTER] = GUNNER_BUILDING_SCORE[map_info._IDX_CONVEYOR]
 
 _NON_CORE_TYPE_INDICES = (
@@ -713,6 +713,32 @@ def get_best_direction(pos):
     return best_g_dir, EntityType.GUNNER, best_g_score
 
 
+def gunner_dir_scores_at(pos):
+    """Score a gunner sitting at `pos` for each of the 8 facings, using the same
+    reasoning as placement scoring (GUNNER_BUILDING_SCORE with the distance
+    discount, rotation debuff, threat penalty and loaded-conveyor bonus).
+
+    Unlike get_best_direction -- which only reads *valid placement* tiles and so
+    reads 0 on an occupied tile -- this scores `pos` as if it were the sole
+    placement tile for every facing, so it works for an EXISTING turret. The
+    scoring path is pure map_info, so this is callable from a turret's own
+    process (no attack.init / rc needed); just keep map_info updated first.
+
+    Returns a list of 8 (Direction, score) in map_info._DIRECTIONS order.
+
+    NB: unlike placement scoring this does NOT subtract `_bm_my_gunner_claims`.
+    That mask includes THIS gunner's own current-facing claim, so subtracting it
+    would zero out the targets in whatever direction we already point -- making
+    every other facing look better and the gunner spin in place forever. A gunner
+    picking its own facing must see all enemy targets, its current ones included."""
+    bit = 1 << (pos.x + pos.y * map_info._width)
+    enemy_team_bm = map_info._bm_team[1 - map_info._my_team_idx]
+    threat = map_info._bm_enemy_turret_threat
+    planes_by_dir = _compute_gunner_dir_scores(enemy_team_bm, threat, (bit,) * 8)
+    directions = map_info._DIRECTIONS
+    return [(directions[d], _read_score(planes_by_dir[d], bit)) for d in range(8)]
+
+
 # ---------------------------------------------------------------------------
 # Candidate generation
 # ---------------------------------------------------------------------------
@@ -928,12 +954,13 @@ def _my_claims():
         my_mask,
         map_info._bm_friendly_bots,
         candidates,
-        passable=map_info._bm_passable_FFF,
+        passable=map_info.passable(),
         tie_self=True,
     )
 
 
 _cached_claims = 0
+_cached_best = None      # nearest reachable placement tile, validated in score()
 MAX_SCORE = 9
 
 # --- when the enemy core becomes a target ----------------------------------
@@ -989,15 +1016,27 @@ def score():
         SENTINEL_BUILDING_SCORE[core] = 0
         GUNNER_BUILDING_SCORE[core] = 0
     else:
-        SENTINEL_BUILDING_SCORE[core] = 16
+        SENTINEL_BUILDING_SCORE[core] = 32
         GUNNER_BUILDING_SCORE[core] = 128
     # The hot scorers read the precomputed bit forms (_SENT_CORE_BITS /
     # _GUN_CORE_BITS_BY_STEP), not the score lists, so re-derive them here or the
     # gate above has no effect.
     _SENT_CORE_BITS = _bits_of(SENTINEL_BUILDING_SCORE[core])
     _GUN_CORE_BITS_BY_STEP = _step_bits_tuple(GUNNER_BUILDING_SCORE[core])
-    global _cached_claims
+    global _cached_claims, _cached_best, cant_attack
     _cached_claims = _my_claims()
+    _cached_best = None
+    if _cached_claims:
+        # Validate reachability here so attack isn't selected (and a builder left
+        # idle at the top priority) when no placement tile can be reached. An
+        # adjacent good spot is dist<=1, so nav.closest catches the instant-build
+        # case too.
+        best, _ = nav.closest(_cached_claims)
+        if best is None:
+            cant_attack |= _cached_claims
+            _cached_claims = 0
+        else:
+            _cached_best = best
     return MAX_SCORE if _cached_claims else 0
 
 
@@ -1214,10 +1253,9 @@ def run():
         return
 
     # Otherwise path one step toward being cardinally adjacent to the best
-    # candidate; we'll build next turn once in position.
-    best, _ = nav.closest(candidates)
+    # candidate (validated reachable in score()); we build next turn in position.
+    best = _cached_best
     if best is None:
-        cant_attack |= candidates
         return
     log(f"Attack: moving toward {best}")
     nav.move_adjacent(best)

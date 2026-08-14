@@ -14,7 +14,7 @@ CARD_DIR = [
 
 barrier_cost = 15
 threat_cost = 12
-conveyor_end_cost = 2
+conveyor_end_cost = 4
 
 
 # Offsets (dx, dy) such that lsb_pos = target_pos + (dx, dy) covers all 9
@@ -38,7 +38,7 @@ def voronoi_claim(my_mask, others_mask, claims, passable=None):
     if not others_mask:
         return claims
     if passable is None:
-        passable = map_info._bm_passable_FFF
+        passable = map_info.passable()
 
     my_front = my_mask & passable
     other_front = others_mask & passable
@@ -84,7 +84,7 @@ def claim_subset(
     if not claims:
         return 0
     if passable is None:
-        passable = map_info._bm_passable_FFF
+        passable = map_info.passable()
     if tie_self:
         return voronoi_claim(my_mask, others_mask, claims, passable)
     return claims & ~voronoi_claim(others_mask, my_mask, claims, passable) & ~others_mask
@@ -104,7 +104,7 @@ class Pathing:
         w = self.width
         start_mask = 1 << (start.x + start.y * w)
         end_mask = 1 << (end.x + end.y * w)
-        passable = map_info._bm_passable_FFF if unknown_passable else (map_info._bm_passable_FFF & map_info._bm_seen)
+        passable = map_info.passable() if unknown_passable else (map_info.passable() & map_info._bm_seen)
         dist = 0
         if start_mask & end_mask:
             return 0
@@ -157,7 +157,7 @@ class Pathing:
         target inside `avoid` to be unreachable.
 
         `side` selects whose perspective the passable mask reflects. True (the
-        default) is our perspective — uses the cached `_bm_passable_FFF` which
+        default) is our perspective — uses `map_info.passable()` which
         avoids enemy threat. False models the enemy's pathing: same blockers
         minus the enemy's own threat (they wouldn't avoid it).
         """
@@ -165,7 +165,7 @@ class Pathing:
             return None, -1
         w = map_info._width
         if side:
-            passable = map_info._bm_passable_FFF
+            passable = map_info.passable()
         else:
             passable = (
                 ~map_info.get_avoid(False, enemy_pov=not side)
@@ -531,6 +531,14 @@ class Pathing:
             convs = map_info._bm_conveyors & ~map_info._bm_my_core_area & map_info._bm_ti_carrying
             t_end = target_mask & convs
             t_core = target_mask & ~convs
+
+        # A core-facing conveyor with nothing feeding it and no adjacent harvester
+        # is an empty feed line into the core -- routing onto it just completes
+        # that line, so it attaches for free (exempt from the conveyor end cost).
+        exempt = t_end & map_info.end_cost_exempt_conveyors()
+        if exempt:
+            t_end &= ~exempt
+            t_core |= exempt
 
         max_c = 1
         max_seed = conveyor_end_cost

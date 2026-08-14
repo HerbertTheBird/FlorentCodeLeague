@@ -35,21 +35,22 @@ def _my_claims():
 # against Khaos). Builders pulled off routing to go wall distant ore are not
 # paying for themselves. Left at 2, where it only fires with nothing else to do.
 MAX_SCORE = 2
-_cached_claims = 0
+_cached_target = None
 def score():
-    global _cached_claims
-    _cached_claims = _my_claims()
-    return 2 if _cached_claims else 0
+    global _cached_target
+    _cached_target = None
+    claims = _my_claims()
+    if claims:
+        best, _ = nav.closest(claims)       # nearest reachable target
+        if best is not None:
+            _cached_target = best
+    return MAX_SCORE if _cached_target is not None else 0
 
 def run():
-    log("DISRUPT")
-    available = _cached_claims
-    if not available:
-        return
-
-    best, _ = nav.closest(available)
+    best = _cached_target
     if best is None:
         return
+    log("DISRUPT")
 
     if rc.can_build_barrier(best) and rc.get_global_resources() >= rc.get_barrier_cost() + map_info.ti_reserve():
         rc.build_barrier(best)

@@ -270,3 +270,25 @@ def select_best(candidates, priority_sets, nav, one_shot_hp: int,
             return chosen
     log("select_best: no winner")
     return None
+
+
+def scrap_if_idle(rc) -> bool:
+    """Self-destruct a turret that has become dead weight: the caller has nothing
+    to shoot this turn, and the turret sees no enemy bots and at most 2 enemy
+    buildings. Such a turret's targets are gone, so recycle it. Returns True if it
+    self-destructed.
+
+    'Sees' means the turret's current vision: enemy bots via map_info tracking,
+    enemy buildings via the controller's nearby-building list (distinct entities,
+    so a 2x2 enemy core counts once)."""
+    if map_info._bm_enemy_bots:
+        return False
+    my_team = map_info._my_team
+    enemy_buildings = 0
+    for bid in rc.get_nearby_buildings():
+        if rc.get_team(bid) != my_team:
+            enemy_buildings += 1
+            if enemy_buildings > 2:
+                return False
+    rc.self_destruct()
+    return True

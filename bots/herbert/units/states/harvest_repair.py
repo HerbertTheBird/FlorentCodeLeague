@@ -125,58 +125,53 @@ def harvestable_ore():
             & ~map_info._bm_et[map_info._IDX_HARVESTER]
             & ~cant_harvest)
 
-MAX_SCORE = 7
-_cached_claims = 0
-def score():
-    global _cached_claims
-    _cached_claims = _my_claims()
-    return MAX_SCORE if _cached_claims else 0
-
-
-def run():
+def _find_harvest_target():
+    """First reachable+affordable ore as (ore, path, ore_bit), else None -- done
+    in score() so the state isn't selected when nothing can be routed/afforded."""
     global cant_harvest
-    log("HARVEST")
-
-    available = _cached_claims
+    available = _my_claims()
     if not available:
-        return
-
+        return None
     w = map_info._width
-    my_team_idx = map_info._my_team_idx
-
-    best_ore = None
-    path = None
-    ore_bit = 0
-    # Deliberately re-read after the destroy below, which does move the cost scale.
     harvester_cost = rc.get_harvester_cost()
     ti = rc.get_global_resources()
     while available:
         candidate, _ = nav.closest(available)
-        log("harvesting", candidate)
         if candidate is None:
             cant_harvest |= available
-            return
+            return None
         cand_n = candidate.x + candidate.y * w
         cand_bit = 1 << cand_n
         cand_path = nav.calculate_conveyor_path(candidate)
         if cand_path is None:
             cant_harvest |= cand_bit
             available &= ~cand_bit
-            log("cant route", candidate, "— retrying")
             continue
         cost = harvester_cost + nav.conveyor_cost(min(cand_path[2], PAYG_HORIZON), rc.get_scale_percent()/100+0.05)
         _cost_map[cand_n] = (cost, rc.get_current_round())
         if cost > ti:
             available &= ~cand_bit
-            log("too expensive", candidate, "— retrying")
             continue
-        best_ore = candidate
-        path = cand_path
-        ore_bit = cand_bit
-        break
+        return (candidate, cand_path, cand_bit)
+    return None
 
-    if best_ore is None:
+
+MAX_SCORE = 7
+_cached_target = None
+def score():
+    global _cached_target
+    _cached_target = _find_harvest_target()
+    return MAX_SCORE if _cached_target is not None else 0
+
+
+def run():
+    target = _cached_target
+    if target is None:
         return
+    log("HARVEST")
+    best_ore, path, ore_bit = target
+    w = map_info._width
+    my_team_idx = map_info._my_team_idx
 
     # A team bit is only set alongside a building, so this implies one stands here.
     if map_info._bm_team[my_team_idx] & ore_bit and rc.can_destroy(best_ore) and has_op():
