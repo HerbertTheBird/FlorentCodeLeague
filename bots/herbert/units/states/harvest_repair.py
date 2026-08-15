@@ -8,6 +8,7 @@ from pathing import Pathing
 from fcode import *
 import units.builder
 import payg
+import comms
 from log import log
 rc: Controller = None
 nav: Pathing = None
@@ -203,6 +204,10 @@ def run(can_move=True):
             log("harvest: building at", best_ore)
             rc.build_harvester(best_ore)
             map_info.update_at(best_ore)
+            # A harvester built cardinally next to the core feeds it directly,
+            # completing a route -- tally it (harvest_repair counts too).
+            if map_info.manhattan(1 << (best_ore.x + best_ore.y * w)) & map_info._bm_my_core_area:
+                comms.note_route_complete()
             return
         log("harvest: wrong side of", best_ore, "- crossing to", p0)
         nav.move_to(p0, can_move=can_move)

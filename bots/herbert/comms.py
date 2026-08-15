@@ -407,9 +407,9 @@ def ally_positions() -> list:
 
 
 def route_total() -> int:
-    """Cumulative "route fully connected" count the core exposes in its comms.
-    On the core this is its own running tally; elsewhere it's the last value
-    read from the core slot."""
+    """Cumulative count of COMPLETE-route events the core has tallied (via
+    note_route_complete reports). On the core it's its own running total; elsewhere
+    it's the last value read from the core slot."""
     return _route_total if _am_core else _core_route_total
 
 

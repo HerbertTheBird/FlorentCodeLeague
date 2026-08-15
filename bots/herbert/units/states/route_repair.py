@@ -243,8 +243,8 @@ def run(can_move=True):
         map_info.update_at(destroy)
         built = True
 
-    # seg_dist is the segment distance from the routed source to the accepting
-    # network; a distance-1 segment built now is the last hop, so the route is
-    # fully connected this turn. Report it so the core can tally completions.
+    # A last-hop conveyor (seg_dist == 1) connects the routed source to a route
+    # target, completing a route -- tally it. route_repair counts too (same as
+    # plain route).
     if built and seg_dist == 1:
         comms.note_route_complete()

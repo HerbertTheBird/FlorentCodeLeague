@@ -1020,9 +1020,11 @@ SIEGE_MIN_HARVESTERS = 2
 def score(can_move=True):
     global _SENT_CORE_BITS, _GUN_CORE_BITS_BY_STEP
     core = map_info._IDX_CORE
-    if (comms.route_total() < 2
-            and defense.my_count(map_info._IDX_HARVESTER) < SIEGE_MIN_HARVESTERS
-            and rc.get_current_round() < SIEGE_OPEN_ROUND):
+    # Siege the enemy core only once we have at least 2 COMPLETE routes -- real
+    # titanium flowing to our core (comms.route_total() is now the live, exact
+    # count from map_info.complete_route_count()). Below that we have no economy to
+    # back a turret planted at their core, so leave it un-targeted.
+    if comms.route_total() < 2:
         SENTINEL_BUILDING_SCORE[core] = 0
         GUNNER_BUILDING_SCORE[core] = 0
     else:

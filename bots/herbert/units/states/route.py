@@ -303,6 +303,7 @@ def _run_plan_action(action, can_move=True) -> None:
         if rc.get_global_resources() >= need and rc.can_build_harvester(ore):
             rc.build_harvester(ore)
             map_info.update_at(ore)
+            comms.note_route_complete()
         else:
             nav.move_to(conv, can_move=can_move)
 
@@ -345,8 +346,8 @@ def run(can_move=True):
         map_info.update_at(destroy)
         built = True
 
-    # seg_dist is the segment distance from the routed source to the accepting
-    # network; a distance-1 segment built now is the last hop, so the route is
-    # fully connected this turn. Report it so the core can tally completions.
+    # A conveyor built as the last hop (seg_dist == 1) connects the routed source
+    # to a route target, so a real route is completed this turn -- tally it. (Only
+    # plain route counts here; route_repair does NOT.)
     if built and seg_dist == 1:
         comms.note_route_complete()
