@@ -100,6 +100,17 @@ they are not legal yet:
                                   shoot at an empty tile. Only tiles this builder
                                   can SEE answer honestly, so keep them inside
                                   the r^2=20 it will have when it reads them.
+    (SEAL,   ((x, y), (x, y), ...), kind)
+                                  builder: barrier whichever of these tiles are
+                                  still open, nearest first, and stop when none
+                                  are. Nothing is assigned -- give the SAME list
+                                  to two builders and they take whatever the
+                                  other has not, which is what you want for a
+                                  ring: the tiles that matter are the ones still
+                                  open when somebody gets there, and which
+                                  builder closes which is of no consequence.
+                                  Order the list by worth, because it is also the
+                                  order they are tried in.
     (ASSAULT, (stand_x, stand_y), (target_x, target_y))
                                   builder: go to the standing tile and hit the
                                   target from it for the rest of the game. Never
@@ -205,6 +216,7 @@ WAIT = "wait"
 STRIKE = "strike"
 ASSAULT = "assault"
 SKIP_UNLESS_ENEMY = "skip_unless_enemy"
+SEAL = "seal"
 
 # --- the arguments that are rules rather than tiles -------------------------
 RELAY = "relay"           # WAIT: until the launchers are finished with us
@@ -367,9 +379,29 @@ OPENERS = {
                 # A is the only one that goes in. (24,13) and (24,15) are the two
                 # tiles either side of (24,14), and taking both walls the west
                 # approach to the enemy core off from the corridor A came up.
-                (GOTO, (24, 14)),
-                (STRIKE, (24, 13), "barrier"),
-                (BUILD, "barrier", (24, 15)),
+                # Then shut the enemy's own ring. (22,13) is the one that pays:
+                # it has wall above at (22,12) and touches the wall at (23,14)
+                # diagonally, so one barrier closes the gap, and it is approached
+                # from (21,13) rather than walked round. MEASURED, enemy
+                # reachable tiles: 524 with the doors alone, 312 once (22,13) and
+                # (22,16) are up. Barriering the four centre ore instead of these
+                # got 520 -- four tiles of denial against two hundred.
+                # The inner ring FIRST, while it can still be walked to. (22,13)
+                # and (22,16) are the only ways through, so the moment either
+                # goes up the x=24 column is unreachable -- the checker caught
+                # exactly that when they were ordered the other way round.
+                # Nothing here is assigned: both builders carry the same tiles
+                # and take whatever the other has not. Deepest first, because
+                # (24,13) is the way in to (24,14) -- seal the near one first and
+                # the far one can no longer be reached. The two roles list them
+                # in opposite orders, so they start at opposite ends and meet.
+                (SEAL, ((24, 14), (24, 15), (24, 13), (24, 16)), "barrier"),
+                # Then the door, from outside it. MEASURED, enemy reachable
+                # tiles: 524 with the outer doors alone, 312 once (22,13) and
+                # (22,16) are up. Barriering the four centre ore instead got 520.
+                (GOTO, (21, 13)),
+                (BUILD, "barrier", (22, 13)),
+                (SEAL, ((22, 16),), "barrier"),
             ],
             [   # role 1 -- B: the same two doors on the south side, and then it
                 # stays home and guards them. Only A pushes on.
@@ -379,6 +411,10 @@ OPENERS = {
                 (BUILD, "barrier", (8, 19)),
                 (GOTO, (20, 19)),
                 (BUILD, "barrier", (21, 19)),
+                (SEAL, ((24, 15), (24, 14), (24, 16), (24, 13)), "barrier"),
+                (GOTO, (21, 16)),
+                (BUILD, "barrier", (22, 16)),
+                (SEAL, ((22, 13),), "barrier"),
             ],
             [   # role 2 -- C
                 (WAIT, (7, 9)),
@@ -573,11 +609,21 @@ OPENERS = {
         "sym": "v",
         "keep_launchers": True,
         "ferry_after": "ore_worked",
-        # Half the crew crosses, half holds the seal. Split on the comms slot
-        # rather than the entity id -- see `opener.split_matches`. On the id this
-        # read 3 of 12 builders from one seat and 9 of 15 from the other, and the
-        # seat that got 3 lost every game.
-        "ferry_who": (2, 1),
+        # Three quarters of the crew crosses. Half was too few to threaten
+        # anything once across, and the seal at row 9 does not need a garrison --
+        # roles 0 and 1 guard it and are excluded from ferrying anyway. Split on
+        # the comms slot rather than the entity id -- see `opener.split_matches`.
+        # On the id this read 3 of 12 builders from one seat and 9 of 15 from the
+        # other, and the seat that got 3 lost every game.
+        "ferry_who": (4, (0, 1, 3)),
+        # Once across, buy sentinels and put them on their supply. 18 damage a
+        # reload kills a 20 HP conveyor outright and the line ignores walls, so
+        # one turret cuts lines no builder of ours could walk to -- and it is
+        # paid for in ammunition rather than the 2 Ti a hit that any defender
+        # out-heals. The floor is what stops the spending eating the ammo: the
+        # core converts 1:1 and a sentinel is 10 a shot, so a turret bought with
+        # the last of the bank never fires.
+        "turret_floor": 250,
         # Our half's ore: two 2x2 clusters, in the corners either side of the
         # core. The seal at row 11 makes this exactly the ore we can ever reach,
         # so "the economy is finished" means these eight tiles are worked.

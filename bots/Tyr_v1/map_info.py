@@ -1702,12 +1702,17 @@ def update(recompute: bool = True) -> None:
 
 
 def is_tile_empty(pos: Position):
-    if not in_bounds(pos):
-        return False
-    if _rc.is_tile_empty(pos):
-        return True
-    bid = _rc.get_tile_building_id(pos)
-    return bid is not None and _rc.get_entity_type(bid) is EntityType.MARKER
+    """Whether a building could go on `pos` at all -- no building, not a wall.
+
+    The second half of this used to treat a MARKER as still-empty, a Cambridge
+    entity Florent does not have: `EntityType.MARKER` raises AttributeError, so
+    every call on an OCCUPIED tile threw, and main.py swallowed it and silently
+    binned the rest of that unit's turn. It stayed hidden because the callers all
+    happened to ask about tiles that were usually free -- units/defense.py:578
+    still carries a comment about dodging it. There is nothing left to check
+    beyond what the engine already answers.
+    """
+    return in_bounds(pos) and _rc.is_tile_empty(pos)
 
 
 def has_builder_bot(pos: Position, include_self: bool = False) -> bool:

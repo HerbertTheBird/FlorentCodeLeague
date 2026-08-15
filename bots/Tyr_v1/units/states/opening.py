@@ -76,12 +76,21 @@ _guard_tile = None      # the one currently being stood next to
 _ferried = False        # has reached the end of the chain; ordinary again
 _ferrying = False       # committed to going, part-way or not
 _eco_done = False       # our ore has all been worked at least once
+_seal_give_up: set = set()   # SEAL tiles we have stopped trying to reach
+_seal_tries: dict = {}       # and how long we spent failing on each
+
+# Turns of getting no closer before a SEAL tile is written off. Generous enough
+# to ride out another builder standing in the corridor, short enough that one
+# unreachable tile does not cost the rest of the list.
+SEAL_GIVE_UP_AFTER = 8
 
 
 def init(c: Controller):
     global rc, nav, _role, _prog, _step, _claimed, _barriers, _guard_tile
-    global _ferried, _ferrying, _eco_done
+    global _ferried, _ferrying, _eco_done, _seal_give_up, _seal_tries
     rc = c
+    _seal_give_up = set()
+    _seal_tries = {}
     nav = units.builder.nav
     _role = None
     _prog = None
@@ -186,6 +195,9 @@ def _claim() -> None:
         # BUILD, or a STRIKE whose fallback is one. All of it wants guarding.
         owned = [op[2] for op in prog if op[0] == openers.BUILD and op[1] == "barrier"]
         owned += [op[1] for op in prog if op[0] == openers.STRIKE and op[2] == "barrier"]
+        for op in prog:
+            if op[0] == openers.SEAL and op[2] == "barrier":
+                owned += list(op[1])
         _barriers = tuple(opener.pos(t) for t in owned)
         log(f"OPENER role {role} claimed at {me}")
         return
@@ -318,6 +330,68 @@ def _wants_ferry() -> bool:
     return True
 
 
+_SENT_R2 = 32
+
+
+def _cut_site():
+    """(site, facing, n) for the sentinel that cuts the most enemy conveyor.
+
+    None when there is nothing worth cutting or nothing to pay with.
+
+    A sentinel is the right instrument for a supply line and a builder is not.
+    18 damage every other reload kills a 20 HP conveyor outright, the line
+    ignores walls so it reaches lines we could never walk to, and it is paid for
+    in ammunition the core banked rather than 2 Ti a hit that any defender
+    out-heals. Once the crossing has made us rich these are the cheapest damage
+    on the board.
+
+    Rays are walked over map_info's own arrays rather than asked for through
+    `get_attackable_tiles_from`, because this considers four sites by eight
+    facings and thirty-two engine calls a turn is not affordable.
+    """
+    if rc.get_global_resources() <= opener.turret_floor():
+        return None
+    enemy = map_info._bm_conveyors & map_info._bm_team[1 - map_info._my_team_idx]
+    if not enemy:
+        return None
+    w, h = map_info._width, map_info._height
+    me = map_info._my_pos
+    best = None
+    for d in map_info._CARDINAL:
+        site = map_info.pos_add(me, d)
+        if not map_info.in_bounds(site) or not map_info.is_tile_empty(site):
+            continue
+        for facing in map_info._DIRECTIONS:      # eight, CENTRE not among them
+            dx, dy = map_info._DIRECTION_DELTAS[facing]
+            n = k = 0
+            while True:
+                k += 1
+                x, y = site.x + dx * k, site.y + dy * k
+                if not (0 <= x < w and 0 <= y < h):
+                    break
+                if (dx * k) ** 2 + (dy * k) ** 2 > _SENT_R2:
+                    break
+                if (enemy >> (x + y * w)) & 1:
+                    n += 1
+            if n and (best is None or n > best[2]):
+                best = (site, facing, n)
+    return best
+
+
+def _cut_conveyors() -> bool:
+    """Build the sentinel `_cut_site` picked. True if one went up."""
+    pick = _cut_site()
+    if pick is None:
+        return False
+    site, facing, n = pick
+    if not (has_op() and rc.can_build_sentinel(site, facing)):
+        return False
+    rc.build_sentinel(site, facing)
+    map_info.update_at(site)
+    log(f"OPENER sentinel at {site} facing {facing}, cutting {n} conveyor(s)")
+    return True
+
+
 def _across() -> bool:
     """Are we on the enemy's half -- nearer their core than our own?"""
     theirs = opener.their_core()
@@ -424,6 +498,11 @@ def score():
             _ferried = True
         if _ferried:
             log(f"OPENER ferried across to {map_info._my_pos}")
+    # An attacker that has arrived is normally an ordinary builder again. On a
+    # map that asks for turrets it stays ours for as long as there is enemy
+    # supply in reach and titanium above the floor to cut it with.
+    if _ferried and opener.wants_attack_turrets() and _cut_site() is not None:
+        return MAX_SCORE
     wants = _wants_ferry()
     if wants:
         _update_ferry_avoid()      # _wants_ferry is what latches _ferrying
@@ -630,6 +709,8 @@ def run():
     """
     global _step
     if _prog is None or _step >= len(_prog):
+        if _ferried and opener.wants_attack_turrets() and _cut_conveyors():
+            return
         if _prog is not None and _barriers:
             _guard()
         elif _wants_ferry():
@@ -749,6 +830,57 @@ def run():
             map_info.update_at(tile)
             log(f"OPENER role {_role} took {tile} with {op[2]}")
             _step += 1
+            break
+
+        if kind == openers.SEAL:
+            # `map_info.type_at`, NOT `rc.get_tile_building_id`: the controller
+            # raises "Position out of vision range" for anything the unit cannot
+            # currently see, and a seal list is by definition a set of tiles it
+            # is still walking towards. main.py swallows the exception, so the
+            # only symptom was the rest of the turn silently going missing --
+            # 1962 of them in one valkyrie game. The cached answer can be stale;
+            # the build is gated on can_build once we are actually beside it.
+            todo = [t for t in (opener.pos(x) for x in op[1])
+                    if map_info.type_at(t.x, t.y) is None
+                    and t not in _seal_give_up]
+            if not todo:
+                _step += 1
+                continue
+            # List order, not nearest. The author controls the order because
+            # the order can matter: on valkyrie (24,13) is the way IN to (24,14),
+            # so sealing the near one first walls us out of the far one. Nearest
+            # -first did exactly that until the checker caught it.
+            me = map_info._my_pos
+            tile = todo[0]
+            if me == tile:
+                # Standing on the very tile. `move_adjacent` counts our own tile
+                # as adjacent and would not move, so step off deliberately.
+                if has_op():
+                    for d in map_info._CARDINAL:
+                        step = map_info.pos_add(tile, d)
+                        if map_info.in_bounds(step) and map_info.is_passable(step):
+                            nav.move_to(step)
+                            break
+                break
+            if abs(tile.x - me.x) + abs(tile.y - me.y) != 1:
+                # A tile we cannot get beside is not worth the rest of the list.
+                # Its own barriers can wall a builder out of the next one along,
+                # and the enemy can do it too, so give up on one rather than
+                # stall on it.
+                if has_op() and not nav.move_adjacent(tile):
+                    _seal_tries[tile] = _seal_tries.get(tile, 0) + 1
+                    if _seal_tries[tile] > SEAL_GIVE_UP_AFTER:
+                        _seal_give_up.add(tile)
+                        log(f"OPENER role {_role} gives up on {tile}, moving on")
+                else:
+                    _seal_tries.pop(tile, None)
+                break
+            if not (has_op() and rc.can_build(opener.build_kind(op[2]), tile)):
+                break
+            rc.build(opener.build_kind(op[2]), tile)
+            map_info.update_at(tile)
+            _seal_tries.pop(tile, None)
+            log(f"OPENER role {_role} sealed {tile}")
             break
 
         if kind == openers.ASSAULT:

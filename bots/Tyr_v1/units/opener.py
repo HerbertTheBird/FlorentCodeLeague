@@ -810,6 +810,21 @@ def sentinel_fire() -> bool:
     return False
 
 
+def turret_floor() -> int:
+    """Titanium a ferried attacker must leave behind when it buys a turret.
+
+    Zero unless the map asks for turrets, in which case it is what keeps the
+    spending from eating the ammunition: the core converts titanium to ammo 1:1
+    and a sentinel is 10 a shot, so a turret bought with the last of the bank is
+    a turret that never fires.
+    """
+    return 0 if spec is None else spec.get("turret_floor", 0)
+
+
+def wants_attack_turrets() -> bool:
+    return bool(spec is not None and spec.get("turret_floor"))
+
+
 def strike_stands_off() -> bool:
     """Does a STRIKE on this map give up a tile rather than fight for it?
 
