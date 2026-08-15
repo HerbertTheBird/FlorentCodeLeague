@@ -174,17 +174,14 @@ def _find_target():
     # instead. Below the threshold it stays in and heals like anything else.
     if _core_hp() >= CORE_HEAL_HP:
         damaged_any &= ~map_info._bm_my_core_area
-    # A lightly-dented building (<= HEAL_MIN_DAMAGE) is only worth pursuing if an
-    # enemy builder is adjacent to it -- that enemy will keep chipping it, so we
-    # want to already be in position when the damage grows past the threshold.
-    # A lightly-dented building with no enemy on it isn't worth a move (and
-    # _do_best_heal won't top it off either), so drop it.
+    # A lightly-dented building (<= HEAL_MIN_DAMAGE) is only worth pursuing if it
+    # was ATTACKED last turn -- i.e. its HP moved (down from a hit, or up from a
+    # heal) between last turn and this one. A static 1-2 point dent isn't under
+    # active fire, so it isn't worth a move (and _do_best_heal won't top it off
+    # either); drop it.
     over2 = _damage_over(damaged_any, HEAL_MIN_DAMAGE)
-    if enemy_bots:
-        light = damaged_any & ~over2                      # damage <= HEAL_MIN_DAMAGE
-        damaged = over2 | (light & map_info.manhattan(enemy_bots))
-    else:
-        damaged = over2
+    light = damaged_any & ~over2                          # damage <= HEAL_MIN_DAMAGE
+    damaged = over2 | (light & map_info._bm_hp_changed)
     # Divide the damaged buildings across builders with the same Voronoi claim
     # every other state uses: only pursue the ones this builder is (weakly)
     # closest to, so several builders don't all converge on one building.

@@ -1,7 +1,5 @@
 from fcode import *
 
-from main import has_op
-
 import map_info
 import pathing
 from pathing import Pathing
@@ -9,6 +7,7 @@ import units.builder
 import units.defense as defense
 from log import DRAW_DEBUG, log
 import comms
+import units.economic_targets as economic_targets
 rc: Controller = None
 nav: Pathing = None
 
@@ -22,7 +21,6 @@ _CARDINAL_BLOCKER_SHIFTS = ()
 
 _GROUP_MASK_CACHE_VERSION = -1
 _GROUP_MASK_CACHE_ENEMY = -1
-_GROUP_MASK_CACHE_LOAD = None
 _SENTINEL_GROUP_MASKS = ()
 _GUNNER_GROUP_MASKS = ()
 
@@ -49,21 +47,23 @@ def init(c: Controller):
 
 
 SENTINEL_BUILDING_SCORE = [0] * map_info._NUM_ET
-SENTINEL_BUILDING_SCORE[map_info._IDX_CORE] = 32 #duplicate value
-SENTINEL_BUILDING_SCORE[map_info._IDX_HARVESTER] = 16
-SENTINEL_BUILDING_SCORE[map_info._IDX_GUNNER] = 16
-SENTINEL_BUILDING_SCORE[map_info._IDX_SENTINEL] = 32
-SENTINEL_BUILDING_SCORE[map_info._IDX_LAUNCHER] = 16
-SENTINEL_BUILDING_SCORE[map_info._IDX_CONVEYOR] = 4
-SENTINEL_BUILDING_SCORE[map_info._IDX_BARRIER] = 6
-SENTINEL_BUILDING_SCORE[map_info._IDX_SPLITTER] = SENTINEL_BUILDING_SCORE[map_info._IDX_CONVEYOR]
+SENTINEL_BUILDING_SCORE[map_info._IDX_CORE] = 16 #duplicate value
+# Tyr does not spend turret builds on harvesters themselves.  Their cardinally
+# adjacent conveyors receive a separate dynamic bonus below.
+SENTINEL_BUILDING_SCORE[map_info._IDX_HARVESTER] = 0
+SENTINEL_BUILDING_SCORE[map_info._IDX_GUNNER] = 0
+SENTINEL_BUILDING_SCORE[map_info._IDX_SENTINEL] = 0
+SENTINEL_BUILDING_SCORE[map_info._IDX_LAUNCHER] = 8
+SENTINEL_BUILDING_SCORE[map_info._IDX_CONVEYOR] = 24
+SENTINEL_BUILDING_SCORE[map_info._IDX_BARRIER] = 8
+SENTINEL_BUILDING_SCORE[map_info._IDX_SPLITTER] = 24
 
 # Gunners snipe single high-value lanes: big bonus for core + backline turrets,
 # smaller gain on clustered infra (sentinels already out-damage them there).
 GUNNER_BUILDING_SCORE = [0] * map_info._NUM_ET
-GUNNER_BUILDING_SCORE[map_info._IDX_CORE] = 63 #duplicate value
-GUNNER_BUILDING_SCORE[map_info._IDX_HARVESTER] = 48
-GUNNER_BUILDING_SCORE[map_info._IDX_GUNNER] = 128
+GUNNER_BUILDING_SCORE[map_info._IDX_CORE] = 128 #duplicate value
+GUNNER_BUILDING_SCORE[map_info._IDX_HARVESTER] = 0
+GUNNER_BUILDING_SCORE[map_info._IDX_GUNNER] = 0
 # Measured 57.6% against Champion_v47 as the sole change; keeping it at 100 and
 # instead making placement prefer safe tiles measured 47.0%.
 #
@@ -75,11 +75,11 @@ GUNNER_BUILDING_SCORE[map_info._IDX_GUNNER] = 128
 # good enough to exploit the fixed facing, aiming gunners at sentinels is a
 # losing trade: outranged 3 to 5, and dead in two 18-damage shots against the six
 # 7-damage shots it needs to answer.
-GUNNER_BUILDING_SCORE[map_info._IDX_SENTINEL] = 64
-GUNNER_BUILDING_SCORE[map_info._IDX_LAUNCHER] = 32
-GUNNER_BUILDING_SCORE[map_info._IDX_CONVEYOR] = 16
-GUNNER_BUILDING_SCORE[map_info._IDX_BARRIER] = 26
-GUNNER_BUILDING_SCORE[map_info._IDX_SPLITTER] = GUNNER_BUILDING_SCORE[map_info._IDX_CONVEYOR]
+GUNNER_BUILDING_SCORE[map_info._IDX_SENTINEL] = 0
+GUNNER_BUILDING_SCORE[map_info._IDX_LAUNCHER] = 14
+GUNNER_BUILDING_SCORE[map_info._IDX_CONVEYOR] = 30
+GUNNER_BUILDING_SCORE[map_info._IDX_BARRIER] = 14
+GUNNER_BUILDING_SCORE[map_info._IDX_SPLITTER] = 30
 
 _NON_CORE_TYPE_INDICES = (
     map_info._IDX_GUNNER,
@@ -120,35 +120,30 @@ SCORE_THRESHOLD_FACTOR = 0.25
 # Every raised value beats the baseline on both instruments, so this is a
 # plateau rather than a lucky cell, and 28 is best on the instrument that can
 # actually see turret trades.
-MIN_ATTACK_SCORE = 32
+MIN_ATTACK_SCORE = 28
 THREAT_PENALTY = 4
 NON_GOOD_TILE_BUFF = 6
-# Flat bonus added to a turret placement tile that sits in the ring immediately
-# around the enemy core (Chebyshev-1), on top of whatever it hits -- pull siege
-# turrets right up against their core. Only applied while the core is actually a
-# target (i.e. the siege gate is open); see the bakes in the score computes.
-ADJ_ENEMY_CORE_SCORE = 24
-# Look-ahead: only give up placing a turret THIS turn to step one tile for a
-# better spot NEXT turn if the better spot's score beats what we could place now
-# by at least this much -- otherwise the one-turn delay isn't worth it.
-MIN_INCREASE_PER_TURN = 4
 
-# Extra score for hitting an ENEMY conveyor that is actively carrying titanium,
-# scaled by how loaded it is (map_info.conv_load_buckets). A fully-loaded belt
-# (top quartile) is worth the full increase; a 3/4-loaded belt 3/4 of it; etc.
-# Makes turrets prefer cutting the enemy's live supply over idle infrastructure.
-# Values are a starting point -- tune freely.
-TI_SCORE_INCREASE_GUNNER = 32
-TI_SCORE_INCREASE_SENTINEL = 12
-
-# Gunner-only knobs. Distance discount: the enemy on the tile directly in front
-# of the gunner (ray-step 0) counts full; every tile further back counts half.
-# Rotation debuff: a gunner can turn, so each facing also earns the value on the
-# OTHER seven facings' rays shifted right by _ROTATION_SHIFT (>> 2 = a quarter).
-# Net per tile: front 1x, 2-in-front 1/2; front of another facing 1/4, its next
-# tile 1/8.
+# Gunner-only knobs. Distance discount: enemy at ray-step k counts as
+# round(score * 0.9^k); k=0 is the tile directly in front of the gunner.
+# Rotation bonus: each direction at a tile gains (sum_8_directions >> 3),
+# approximating 0.1 * total — represents value accessible by rotating.
+_DISCOUNT_NUM = 9
+_DISCOUNT_DEN = 10
 _MAX_DISCOUNT_STEPS = 3  # gunner ray length (vision radius squared 13)
-_ROTATION_SHIFT = 2
+_ROTATION_SHIFT = 3
+
+# Dynamic economic bonuses.  A conveyor beside a hostile harvester is the
+# useful denial target, rather than the harvester.  A known-loaded conveyor on
+# a directionally valid chain into their core is intentionally sentinel-heavy:
+# 24 base + 64 bonus comfortably clears the passive placement threshold and
+# beats a gunner's generic conveyor score on the same site.
+_HARVESTER_CONVEYOR_SENTINEL_BONUS = 40
+_HARVESTER_CONVEYOR_GUNNER_BONUS = 42
+_CORE_SUPPLY_SENTINEL_BONUS = 64
+_HARVESTER_CONVEYOR_SENTINEL_BITS = ()
+_HARVESTER_CONVEYOR_GUNNER_BITS_BY_STEP = ()
+_CORE_SUPPLY_SENTINEL_BITS = ()
 
 cant_attack = 0
 
@@ -169,26 +164,22 @@ def _bits_of(c):
     return tuple(result)
 
 
-def _build_score_groups(score_table, encode=_bits_of):
-    """Group non-core type indices by equal score.
-
-    `encode` turns a score into the `bits` field of each group: a flat
-    bit-position tuple for sentinels, one such tuple per ray step for gunners."""
+def _build_score_groups(score_table):
+    """Group non-core type indices by equal score."""
     groups: dict[int, list[int]] = {}
     for t_idx in _NON_CORE_TYPE_INDICES:
         s = score_table[t_idx]
         if s:
             groups.setdefault(s, []).append(t_idx)
-    return [(s, encode(s), tuple(idxs)) for s, idxs in groups.items()]
+    return [(s, _bits_of(s), tuple(idxs)) for s, idxs in groups.items()]
 
 
 def _step_score(score, step):
-    """Ray distance discount. The tile directly in front of the gunner (step 0)
-    counts full; every tile behind it counts half: step 0 -> score, step >= 1 ->
-    round-half-up(score / 2)."""
-    if step == 0:
-        return score
-    return (score + 1) // 2
+    """Round-half-up integer of score * (_DISCOUNT_NUM / _DISCOUNT_DEN)^step."""
+    val = score
+    for _ in range(step):
+        val = (val * _DISCOUNT_NUM + _DISCOUNT_DEN // 2) // _DISCOUNT_DEN
+    return val
 
 
 def _step_bits_tuple(score):
@@ -196,20 +187,27 @@ def _step_bits_tuple(score):
     return tuple(_bits_of(_step_score(score, k)) for k in range(_MAX_DISCOUNT_STEPS))
 
 
+def _build_gunner_score_groups(score_table):
+    """Same shape as _build_score_groups, but `bits` is a per-step tuple of
+    bit-position tuples — one entry per ray step, holding the bits of the
+    discounted score at that step."""
+    groups: dict[int, list[int]] = {}
+    for t_idx in _NON_CORE_TYPE_INDICES:
+        s = score_table[t_idx]
+        if s:
+            groups.setdefault(s, []).append(t_idx)
+    return [(s, _step_bits_tuple(s), tuple(idxs)) for s, idxs in groups.items()]
+
+
 _SENTINEL_SCORE_GROUPS = _build_score_groups(SENTINEL_BUILDING_SCORE)
-_GUNNER_SCORE_GROUPS = _build_score_groups(GUNNER_BUILDING_SCORE, _step_bits_tuple)
+_GUNNER_SCORE_GROUPS = _build_gunner_score_groups(GUNNER_BUILDING_SCORE)
 
 _THREAT_PENALTY_BITS = _bits_of(THREAT_PENALTY)
-_ADJ_ENEMY_CORE_BITS = _bits_of(ADJ_ENEMY_CORE_SCORE)
 _SENT_CORE_BITS = _bits_of(SENTINEL_BUILDING_SCORE[map_info._IDX_CORE])
 _GUN_CORE_BITS_BY_STEP = _step_bits_tuple(GUNNER_BUILDING_SCORE[map_info._IDX_CORE])
-
-# Loaded-conveyor bonus per quartile k=1..4 (score * k / 4). Sentinel is flat;
-# gunner is per ray-step discounted like every other building value.
-_TI_SENT_SCORE_BY_BUCKET = tuple(TI_SCORE_INCREASE_SENTINEL * k // 4 for k in range(1, 5))
-_TI_GUN_SCORE_BY_BUCKET = tuple(TI_SCORE_INCREASE_GUNNER * k // 4 for k in range(1, 5))
-_TI_SENT_BITS_BY_BUCKET = tuple(_bits_of(s) for s in _TI_SENT_SCORE_BY_BUCKET)
-_TI_GUN_BITS_BY_BUCKET = tuple(_step_bits_tuple(s) for s in _TI_GUN_SCORE_BY_BUCKET)
+_HARVESTER_CONVEYOR_SENTINEL_BITS = _bits_of(_HARVESTER_CONVEYOR_SENTINEL_BONUS)
+_HARVESTER_CONVEYOR_GUNNER_BITS_BY_STEP = _step_bits_tuple(_HARVESTER_CONVEYOR_GUNNER_BONUS)
+_CORE_SUPPLY_SENTINEL_BITS = _bits_of(_CORE_SUPPLY_SENTINEL_BONUS)
 
 def _ensure_attack_shift_plans():
     """Precompute static shift plans used by the hot attack scorers."""
@@ -272,15 +270,11 @@ def _ensure_attack_shift_plans():
 
 def _enemy_score_group_masks(enemy_team_bm):
     """Grouped enemy masks shared by sentinel/gunner scoring for this layout."""
-    global _GROUP_MASK_CACHE_VERSION, _GROUP_MASK_CACHE_ENEMY, _GROUP_MASK_CACHE_LOAD
+    global _GROUP_MASK_CACHE_VERSION, _GROUP_MASK_CACHE_ENEMY
     global _SENTINEL_GROUP_MASKS, _GUNNER_GROUP_MASKS
 
     sv = map_info._struct_version
-    # Load buckets change when titanium moves, which does NOT bump _struct_version,
-    # so they belong in the cache key alongside it.
-    load_key = tuple(map_info.conv_load_buckets)
-    if (_GROUP_MASK_CACHE_VERSION == sv and _GROUP_MASK_CACHE_ENEMY == enemy_team_bm
-            and _GROUP_MASK_CACHE_LOAD == load_key):
+    if _GROUP_MASK_CACHE_VERSION == sv and _GROUP_MASK_CACHE_ENEMY == enemy_team_bm:
         return _SENTINEL_GROUP_MASKS, _GUNNER_GROUP_MASKS
 
     bm_et = map_info._bm_et
@@ -303,18 +297,8 @@ def _enemy_score_group_masks(enemy_team_bm):
         if bm_group:
             gunner_groups.append((s, bits, bm_group))
 
-    # Loaded-enemy-conveyor bonus: one extra score group per quartile, restricted
-    # to the enemy conveyors in that bucket. Added on top of the conveyor's own
-    # value, so a live belt scores base + bonus along the ray. Pure bit ops.
-    for k in range(4):
-        bm_load = map_info.conv_load_buckets[k] & enemy_team_bm
-        if bm_load:
-            sentinel_groups.append((_TI_SENT_SCORE_BY_BUCKET[k], _TI_SENT_BITS_BY_BUCKET[k], bm_load))
-            gunner_groups.append((_TI_GUN_SCORE_BY_BUCKET[k], _TI_GUN_BITS_BY_BUCKET[k], bm_load))
-
     _GROUP_MASK_CACHE_VERSION = sv
     _GROUP_MASK_CACHE_ENEMY = enemy_team_bm
-    _GROUP_MASK_CACHE_LOAD = load_key
     _SENTINEL_GROUP_MASKS = tuple(sentinel_groups)
     _GUNNER_GROUP_MASKS = tuple(gunner_groups)
     return _SENTINEL_GROUP_MASKS, _GUNNER_GROUP_MASKS
@@ -347,12 +331,11 @@ def _add_planes_into(dst, src):
         carry = (a & b) | (carry & (a ^ b))
 
 
-def _read_score(planes, tile_bit):
-    """Read the integer score stored at the tile whose bit is `tile_bit` (a
-    single-bit mask, not an index)."""
+def _read_score(planes, tile_n):
+    """Read the integer score stored at `tile_n` across the planes."""
     score = 0
     for i in range(_NUM_PLANES):
-        if planes[i] & tile_bit:
+        if (planes[i] >> tile_n) & 1:
             score |= 1 << i
     return score
 
@@ -386,29 +369,35 @@ def _ge_threshold_mask(planes, threshold, candidates):
             eq &= ~p
     return gt | eq
 
-def _get_cached_sentinel_scores(enemy_team_bm: int, threat: int, sentinel_masks: tuple[int, ...]):
+def _get_cached_sentinel_scores(enemy_team_bm: int, threat: int,
+                                sentinel_masks: tuple[int, ...],
+                                harvester_conveyors: int,
+                                supply_conveyors: int):
     """Sentinel per-direction score planes, cached across rounds by exact masks."""
     global _SENTINEL_SCORE_CACHE_KEY, _SENTINEL_SCORE_CACHE
 
     key = (map_info._struct_version, enemy_team_bm, sentinel_masks,
-           tuple(map_info.conv_load_buckets))
+           harvester_conveyors, supply_conveyors)
     if key != _SENTINEL_SCORE_CACHE_KEY:
         _SENTINEL_SCORE_CACHE = _compute_sentinel_dir_scores(
-            enemy_team_bm, threat, sentinel_masks
+            enemy_team_bm, threat, sentinel_masks,
+            harvester_conveyors, supply_conveyors
         )
         _SENTINEL_SCORE_CACHE_KEY = key
     return _SENTINEL_SCORE_CACHE
 
 
-def _get_cached_gunner_per_dir(enemy_team_bm: int, threat: int, gunner_masks: tuple[int, ...]):
+def _get_cached_gunner_per_dir(enemy_team_bm: int, threat: int,
+                               gunner_masks: tuple[int, ...],
+                               harvester_conveyors: int):
     """Gunner per-direction planes, cached across rounds by exact masks."""
     global _GUNNER_PER_DIR_CACHE_KEY, _GUNNER_PER_DIR_CACHE
 
     key = (map_info._struct_version, enemy_team_bm, gunner_masks,
-           tuple(map_info.conv_load_buckets))
+           harvester_conveyors)
     if key != _GUNNER_PER_DIR_CACHE_KEY:
         _GUNNER_PER_DIR_CACHE = _compute_gunner_dir_scores(
-            enemy_team_bm, threat, gunner_masks
+            enemy_team_bm, threat, gunner_masks, harvester_conveyors
         )
         _GUNNER_PER_DIR_CACHE_KEY = key
     return _GUNNER_PER_DIR_CACHE
@@ -418,7 +407,9 @@ def _get_cached_gunner_per_dir(enemy_team_bm: int, threat: int, gunner_masks: tu
 # Sentinel: returns 8 plane-lists, one per facing direction
 # ---------------------------------------------------------------------------
 
-def _compute_sentinel_dir_scores(enemy_team_bm, threat, sentinel_masks):
+def _compute_sentinel_dir_scores(enemy_team_bm, threat, sentinel_masks,
+                                 harvester_conveyors=0,
+                                 supply_conveyors=0):
     """For each of 8 facing directions, compute a per-tile sentinel score plane
     list. Returns: list of 8 plane-lists (list[list[int]]). Reading position n
     from the d-th inner list yields the sentinel's total damage-score if
@@ -443,6 +434,10 @@ def _compute_sentinel_dir_scores(enemy_team_bm, threat, sentinel_masks):
     type_contribs, _ = _enemy_score_group_masks(enemy_team_bm)
     sent_core_bits = _SENT_CORE_BITS
     threat_penalty_bits = _THREAT_PENALTY_BITS
+    economic_contribs = (
+        (_HARVESTER_CONVEYOR_SENTINEL_BITS, harvester_conveyors),
+        (_CORE_SUPPLY_SENTINEL_BITS, supply_conveyors),
+    )
 
     non_threat = board_mask & ~threat
     non_zero = 0
@@ -469,12 +464,30 @@ def _compute_sentinel_dir_scores(enemy_team_bm, threat, sentinel_masks):
                 restricted = contrib & mask_d
                 if restricted:
                     add_bits_to_planes(planes, bits, restricted)
+            for bits, bm_t in economic_contribs:
+                masked = bm_t & sm
+                if not masked:
+                    continue
+                contrib = masked << rev_off
+                non_zero |= contrib
+                restricted = contrib & mask_d
+                if restricted:
+                    add_bits_to_planes(planes, bits, restricted)
         for sm, rev_off in neg_shifts[d]:
             if core_mask:
                 masked = core_mask & sm
                 if masked:
                     core_reach |= masked >> rev_off
             for _s, bits, bm_t in type_contribs:
+                masked = bm_t & sm
+                if not masked:
+                    continue
+                contrib = masked >> rev_off
+                non_zero |= contrib
+                restricted = contrib & mask_d
+                if restricted:
+                    add_bits_to_planes(planes, bits, restricted)
+            for bits, bm_t in economic_contribs:
                 masked = bm_t & sm
                 if not masked:
                     continue
@@ -496,14 +509,6 @@ def _compute_sentinel_dir_scores(enemy_team_bm, threat, sentinel_masks):
             baked = baked_base & sentinel_masks[d]
             if baked:
                 add_bits_to_planes(planes, threat_penalty_bits, baked)
-
-    # Bonus for placing right beside the enemy core (only while it's a target).
-    if sent_core_bits and _ADJ_ENEMY_CORE_BITS and core_mask:
-        adj_core = (map_info.expand_chebyshev(core_mask) & ~core_mask) & board_mask
-        for d, planes in enumerate(all_planes):
-            baked = adj_core & sentinel_masks[d]
-            if baked:
-                add_bits_to_planes(planes, _ADJ_ENEMY_CORE_BITS, baked)
     return all_planes
 
 
@@ -512,8 +517,12 @@ def _compute_sentinel_dir_scores(enemy_team_bm, threat, sentinel_masks):
 # ---------------------------------------------------------------------------
 
 def _gunner_ray_blocked_mask():
-    """Tiles that block a gunner ray: walls + any allied building. A gunner
-    can't shoot through its own infrastructure."""
+    """Tiles that block a gunner placement-score ray.
+
+    Besides walls and allied infrastructure, Tyr treats enemy harvesters as
+    opaque: gunners intentionally refuse to shoot them, so a target behind one
+    is not useful placement value.
+    """
     global _GUNNER_BLOCKED_CACHE_VERSION, _GUNNER_BLOCKED_MASK
 
     sv = map_info._struct_version
@@ -522,24 +531,27 @@ def _gunner_ray_blocked_mask():
 
     walls = map_info._bm_env[map_info._IDX_ENV_WALL]
     my_solid = map_info._bm_team[map_info._my_team_idx]
-    _GUNNER_BLOCKED_MASK = walls | my_solid
+    enemy = map_info._bm_team[1 - map_info._my_team_idx]
+    enemy_harvesters = map_info._bm_et[map_info._IDX_HARVESTER] & enemy
+    _GUNNER_BLOCKED_MASK = walls | my_solid | enemy_harvesters
     _GUNNER_BLOCKED_CACHE_VERSION = sv
     return _GUNNER_BLOCKED_MASK
 
 
-def _compute_gunner_dir_scores(enemy_team_bm, threat, gunner_masks):
+def _compute_gunner_dir_scores(enemy_team_bm, threat, gunner_masks,
+                               harvester_conveyors=0):
     """For each of 8 facing directions, compute a per-tile gunner score plane
     list. Returns: list of 8 plane-lists (list[list[int]]). Reading position n
     from the d-th inner list yields the gunner's score if placed at n facing
     direction d — but ONLY if n is a valid placement tile for that direction
     (per `gunner_masks[d]`); otherwise the score reads 0.
 
-    Gunner rays are blocked by walls AND by any allied building. Scores come
-    from GUNNER_BUILDING_SCORE, applied with a distance discount: the enemy on
-    the tile directly in front of the gunner (ray-step 0) counts full, every tile
-    behind it counts half. Each facing additionally earns the OTHER facings' ray
-    value shifted right by _ROTATION_SHIFT (a quarter) — so an enemy in front of a
-    different facing is worth 1/4, its next tile 1/8 — the value a rotation reaches.
+    Gunner rays are blocked by walls AND by allied non-road, non-marker
+    buildings. Scores come from GUNNER_BUILDING_SCORE, applied with a per-step
+    distance discount (round(score * 0.9^k) for an enemy at ray-step k from
+    the gunner — k=0 is the adjacent tile). Each gunner tile additionally
+    gains a rotation bonus equal to (sum_of_8_directions >> _ROTATION_SHIFT),
+    weighting tiles whose other facings carry value too.
 
     Core is single-counted per gunner per direction at the closest hit step
     (matches prior behavior, just discounted by that step's factor).
@@ -567,6 +579,7 @@ def _compute_gunner_dir_scores(enemy_team_bm, threat, gunner_masks):
     n_types = len(type_initial)
     type_bits_by_step_arr = [t[1] for t in type_initial]
     type_bm_initial = [t[2] for t in type_initial]
+    economic_bits_by_step = _HARVESTER_CONVEYOR_GUNNER_BITS_BY_STEP
     type_bms = [0] * n_types
     for d in range(8):
         planes = [0] * num_planes
@@ -580,6 +593,7 @@ def _compute_gunner_dir_scores(enemy_team_bm, threat, gunner_masks):
         for j in range(n_types):
             type_bms[j] = type_bm_initial[j]
         core_seen = 0  # mask_d gunners that already had core scored at a closer step
+        economic_cur = harvester_conveyors
         if soff >= 0:
             for step in range(max_step):
                 if core_cur:
@@ -605,7 +619,14 @@ def _compute_gunner_dir_scores(enemy_team_bm, threat, gunner_masks):
                             step_bits = type_bits_by_step_arr[j][step]
                             if step_bits:
                                 add_bits_to_planes(planes, step_bits, restricted)
-                if not core_cur and not any_alive:
+                if economic_cur:
+                    economic_cur = (economic_cur & combined_sm) << soff
+                    if economic_cur:
+                        non_zero |= economic_cur
+                        restricted = economic_cur & mask_d
+                        if restricted:
+                            add_bits_to_planes(planes, economic_bits_by_step[step], restricted)
+                if not core_cur and not any_alive and not economic_cur:
                     break
         else:
             nsoff = -soff
@@ -633,28 +654,29 @@ def _compute_gunner_dir_scores(enemy_team_bm, threat, gunner_masks):
                             step_bits = type_bits_by_step_arr[j][step]
                             if step_bits:
                                 add_bits_to_planes(planes, step_bits, restricted)
-                if not core_cur and not any_alive:
+                if economic_cur:
+                    economic_cur = (economic_cur & combined_sm) >> nsoff
+                    if economic_cur:
+                        non_zero |= economic_cur
+                        restricted = economic_cur & mask_d
+                        if restricted:
+                            add_bits_to_planes(planes, economic_bits_by_step[step], restricted)
+                if not core_cur and not any_alive and not economic_cur:
                     break
         append_planes(planes)
 
-    # Rotation debuff: a gunner can rotate, so each facing d also earns a
-    # quarter-weighted share of the value on the OTHER seven facings' rays (an
-    # enemy in front of another facing counts 1/4, one tile further 1/8, matching
-    # the ray's own 1x / 1/2 steps). The facing's own ray must stay at full
-    # weight, so snapshot the pure per-direction rays first and, for each d, add
-    # only the sum of the *other* directions' rays >> _ROTATION_SHIFT. Done before
-    # the threat penalty so the bonus reflects raw damage potential, not safety.
-    ray_planes = [list(p) for p in all_planes]
-    for d in range(8):
-        others = [0] * num_planes
-        for d2 in range(8):
-            if d2 != d:
-                add_planes_into(others, ray_planes[d2])
-        bonus_planes = [0] * num_planes
-        for i in range(num_planes - _ROTATION_SHIFT):
-            bonus_planes[i] = others[i + _ROTATION_SHIFT]
-        if any(bonus_planes):
-            add_planes_into(all_planes[d], bonus_planes)
+    # Rotation bonus: add (sum_8_dirs >> _ROTATION_SHIFT) to each direction's
+    # plane. Approximates 0.1 * total. Computed before threat penalty so the
+    # bonus reflects raw enemy-damage potential, not threat-tile preference.
+    summed = [0] * num_planes
+    for d_planes in all_planes:
+        add_planes_into(summed, d_planes)
+    bonus_planes = [0] * num_planes
+    for i in range(num_planes - _ROTATION_SHIFT):
+        bonus_planes[i] = summed[i + _ROTATION_SHIFT]
+    if any(bonus_planes):
+        for d_planes in all_planes:
+            add_planes_into(d_planes, bonus_planes)
 
     if threat_penalty_bits:
         baked_base = non_threat & non_zero
@@ -662,15 +684,6 @@ def _compute_gunner_dir_scores(enemy_team_bm, threat, gunner_masks):
             baked = baked_base & gunner_masks[d]
             if baked:
                 add_bits_to_planes(planes, threat_penalty_bits, baked)
-
-    # Bonus for placing right beside the enemy core (only while it's a target --
-    # gun_core_bits_by_step is empty when the siege gate is closed).
-    if gun_core_bits_by_step[0] and _ADJ_ENEMY_CORE_BITS and core_mask:
-        adj_core = (map_info.expand_chebyshev(core_mask) & ~core_mask) & board_mask
-        for d, planes in enumerate(all_planes):
-            baked = adj_core & gunner_masks[d]
-            if baked:
-                add_bits_to_planes(planes, _ADJ_ENEMY_CORE_BITS, baked)
     return all_planes
 
 
@@ -683,10 +696,14 @@ def get_best_direction(pos):
 
     Sentinel and gunner both use their best valid-placement direction score
     as the decision basis. Non-good tiles get a uniform selection bias so
-    friendly "good" conveyors are less likely to be sacrificed for
-    low-value attacks."""
-    
-    bit = 1 << (pos.x + pos.y * map_info._width)
+    friendly "good" conveyors/bridges are less likely to be sacrificed for
+    low-value attacks.
+
+    Breach is ignored for now — never returned."""
+    w = map_info._width
+    px, py = pos.x, pos.y
+    n = px + py * w
+    bit = 1 << n
 
     _ensure_sentinel_planes()
     _ensure_gunner_scores()
@@ -702,7 +719,7 @@ def get_best_direction(pos):
     for d in range(8):
         if not (sentinel_masks[d] & bit):
             continue
-        s = _read_score(sent_planes_by_dir[d], bit)
+        s = _read_score(sent_planes_by_dir[d], n)
         if s > best_s_score:
             best_s_score = s
             best_s_dir = directions[d]
@@ -712,7 +729,7 @@ def get_best_direction(pos):
     for d in range(8):
         if not (gunner_masks[d] & bit):
             continue
-        s = _read_score(gun_planes_by_dir[d], bit)
+        s = _read_score(gun_planes_by_dir[d], n)
         if s > best_g_score:
             best_g_score = s
             best_g_dir = directions[d]
@@ -740,32 +757,6 @@ def get_best_direction(pos):
     return best_g_dir, EntityType.GUNNER, best_g_score
 
 
-def gunner_dir_scores_at(pos):
-    """Score a gunner sitting at `pos` for each of the 8 facings, using the same
-    reasoning as placement scoring (GUNNER_BUILDING_SCORE with the distance
-    discount, rotation debuff, threat penalty and loaded-conveyor bonus).
-
-    Unlike get_best_direction -- which only reads *valid placement* tiles and so
-    reads 0 on an occupied tile -- this scores `pos` as if it were the sole
-    placement tile for every facing, so it works for an EXISTING turret. The
-    scoring path is pure map_info, so this is callable from a turret's own
-    process (no attack.init / rc needed); just keep map_info updated first.
-
-    Returns a list of 8 (Direction, score) in map_info._DIRECTIONS order.
-
-    NB: unlike placement scoring this does NOT subtract `_bm_my_turret_claims`.
-    That mask includes THIS gunner's own current-facing claim, so subtracting it
-    would zero out the targets in whatever direction we already point -- making
-    every other facing look better and the gunner spin in place forever. A gunner
-    picking its own facing must see all enemy targets, its current ones included."""
-    bit = 1 << (pos.x + pos.y * map_info._width)
-    enemy_team_bm = map_info._bm_team[1 - map_info._my_team_idx]
-    threat = map_info._bm_enemy_turret_threat
-    planes_by_dir = _compute_gunner_dir_scores(enemy_team_bm, threat, (bit,) * 8)
-    directions = map_info._DIRECTIONS
-    return [(directions[d], _read_score(planes_by_dir[d], bit)) for d in range(8)]
-
-
 # ---------------------------------------------------------------------------
 # Candidate generation
 # ---------------------------------------------------------------------------
@@ -783,11 +774,6 @@ def _placement_candidates():
     all_bots = (map_info._bm_friendly_bots | map_info._bm_enemy_bots) & ~my_bit
     candidates &= ~all_bots
     candidates &= ~cant_attack
-    # Never place a turret (gunner OR sentinel) on a tile in one of my gunners'
-    # lines of fire: a gunner ray stops at the first building, so a turret there
-    # blocks the shot behind it. (Sentinel lines aren't blockable, so they're not
-    # in this mask.)
-    candidates &= ~map_info._bm_my_gunner_rays
     if not candidates:
         return _EMPTY_CANDIDATE_MASKS, _EMPTY_CANDIDATE_MASKS
 
@@ -893,6 +879,40 @@ _round_cache_can_afford_sent = False
 _round_cache_can_afford_gun = False
 
 
+# An isolated enemy turret is worth destroying (a defended line of them is not).
+# Score used for an enemy sentinel/gunner when it's the only one of its kind.
+ISOLATED_TURRET_KILL_SCORE = 48
+
+
+def _update_enemy_turret_scores():
+    """Kill an ISOLATED enemy turret. When we know of exactly ONE enemy sentinel
+    (or exactly one enemy gunner), make that type a valid target so our sentinels
+    and gunners aim to destroy it; with 0 or 2+ of a kind, leave it at 0 (trading
+    turrets against a defended line loses). Only re-derives the score groups and
+    drops the dependent caches when a value actually changes."""
+    global _SENTINEL_SCORE_GROUPS, _GUNNER_SCORE_GROUPS
+    global _GROUP_MASK_CACHE_VERSION, _SENTINEL_SCORE_CACHE_KEY, _GUNNER_PER_DIR_CACHE_KEY
+    enemy = map_info._bm_team[1 - map_info._my_team_idx]
+    n_sent = bin(map_info._bm_et[map_info._IDX_SENTINEL] & enemy).count("1")
+    n_gun = bin(map_info._bm_et[map_info._IDX_GUNNER] & enemy).count("1")
+    sent_score = ISOLATED_TURRET_KILL_SCORE if n_sent == 1 else 0
+    gun_score = ISOLATED_TURRET_KILL_SCORE if n_gun == 1 else 0
+    changed = False
+    for tbl in (SENTINEL_BUILDING_SCORE, GUNNER_BUILDING_SCORE):
+        if tbl[map_info._IDX_SENTINEL] != sent_score:
+            tbl[map_info._IDX_SENTINEL] = sent_score
+            changed = True
+        if tbl[map_info._IDX_GUNNER] != gun_score:
+            tbl[map_info._IDX_GUNNER] = gun_score
+            changed = True
+    if changed:
+        _SENTINEL_SCORE_GROUPS = _build_score_groups(SENTINEL_BUILDING_SCORE)
+        _GUNNER_SCORE_GROUPS = _build_gunner_score_groups(GUNNER_BUILDING_SCORE)
+        _GROUP_MASK_CACHE_VERSION = -1     # recompute _enemy_score_group_masks
+        _SENTINEL_SCORE_CACHE_KEY = None   # recompute sentinel planes
+        _GUNNER_PER_DIR_CACHE_KEY = None   # recompute gunner planes
+
+
 def _ensure_round_cache():
     global _round_cache_round, _round_cache_attack_candidates
     global _round_cache_sentinel_planes, _round_cache_gunner_planes
@@ -901,11 +921,11 @@ def _ensure_round_cache():
     if _round_cache_round == r:
         return
     _round_cache_round = r
+    _update_enemy_turret_scores()
     _round_cache_sentinel_planes = None
     _round_cache_gunner_planes = None
     ti = rc.get_global_resources()
     reserve = map_info.ti_reserve()
-    reserve = 0
     _round_cache_can_afford_sent = ti >= rc.get_sentinel_cost() + reserve
     _round_cache_can_afford_gun = ti >= rc.get_gunner_cost() + reserve
     _round_cache_attack_candidates = _get_attack_candidates()
@@ -915,9 +935,14 @@ def _ensure_round_cache():
 
 def _round_cache_enemy_inputs():
     """Inputs shared by sentinel and gunner scoring."""
-    enemy_team_bm = map_info._bm_team[1 - map_info._my_team_idx] & ~map_info._bm_my_turret_claims
+    enemy_team_bm = map_info._bm_team[1 - map_info._my_team_idx] & ~map_info._bm_my_gunner_claims
     threat = map_info._bm_enemy_turret_threat
-    return enemy_team_bm, threat
+    harvester_conveyors, supply_conveyors = economic_targets.masks()
+    # Claims suppress already-covered enemy targets for placement. Apply the
+    # same suppression to dynamic bonuses so they cannot resurrect one.
+    harvester_conveyors &= enemy_team_bm
+    supply_conveyors &= enemy_team_bm
+    return enemy_team_bm, threat, harvester_conveyors, supply_conveyors
 
 
 def _ensure_sentinel_planes():
@@ -925,9 +950,12 @@ def _ensure_sentinel_planes():
     global _round_cache_sentinel_planes
     if _round_cache_sentinel_planes is not None:
         return
-    enemy_team_bm, threat = _round_cache_enemy_inputs()
+    enemy_team_bm, threat, harvester_conveyors, supply_conveyors = _round_cache_enemy_inputs()
     sentinel_masks = _round_cache_placement_masks[0]
-    _round_cache_sentinel_planes = _get_cached_sentinel_scores(enemy_team_bm, threat, sentinel_masks)
+    _round_cache_sentinel_planes = _get_cached_sentinel_scores(
+        enemy_team_bm, threat, sentinel_masks,
+        harvester_conveyors, supply_conveyors,
+    )
 
 
 def _ensure_gunner_scores():
@@ -935,9 +963,11 @@ def _ensure_gunner_scores():
     global _round_cache_gunner_planes
     if _round_cache_gunner_planes is not None:
         return
-    enemy_team_bm, threat = _round_cache_enemy_inputs()
+    enemy_team_bm, threat, harvester_conveyors, _ = _round_cache_enemy_inputs()
     gunner_masks = _round_cache_placement_masks[1]
-    _round_cache_gunner_planes = _get_cached_gunner_per_dir(enemy_team_bm, threat, gunner_masks)
+    _round_cache_gunner_planes = _get_cached_gunner_per_dir(
+        enemy_team_bm, threat, gunner_masks, harvester_conveyors,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -987,14 +1017,13 @@ def _my_claims():
         my_mask,
         map_info._bm_friendly_bots,
         candidates,
-        passable=map_info.passable(),
+        passable=map_info._bm_passable_FFF,
         tie_self=True,
     )
 
 
 _cached_claims = 0
-_cached_best = None      # nearest reachable placement tile, validated in score()
-MAX_SCORE = 9
+MAX_SCORE = 6
 
 # --- when the enemy core becomes a target ----------------------------------
 # The enemy core is worth 128 to a gunner and 16 to a sentinel, far above the
@@ -1040,43 +1069,26 @@ MAX_SCORE = 9
 SIEGE_OPEN_ROUND = 150
 SIEGE_MIN_HARVESTERS = 2
 
-def score(can_move=True):
+def score():
     global _SENT_CORE_BITS, _GUN_CORE_BITS_BY_STEP
+    if units.builder._econ_only:
+        return 0
     core = map_info._IDX_CORE
-    # Siege the enemy core only once we have at least 2 COMPLETE routes -- real
-    # titanium flowing to our core (comms.route_total() is now the live, exact
-    # count from map_info.complete_route_count()). Below that we have no economy to
-    # back a turret planted at their core, so leave it un-targeted.
-    if comms.route_total() < 2:
+    if (comms.route_total() < 2
+            and defense.my_count(map_info._IDX_HARVESTER) < SIEGE_MIN_HARVESTERS
+            and rc.get_current_round() < SIEGE_OPEN_ROUND):
         SENTINEL_BUILDING_SCORE[core] = 0
         GUNNER_BUILDING_SCORE[core] = 0
     else:
-        SENTINEL_BUILDING_SCORE[core] = 32
-        GUNNER_BUILDING_SCORE[core] = 63
+        SENTINEL_BUILDING_SCORE[core] = 16
+        GUNNER_BUILDING_SCORE[core] = 128
     # The hot scorers read the precomputed bit forms (_SENT_CORE_BITS /
     # _GUN_CORE_BITS_BY_STEP), not the score lists, so re-derive them here or the
     # gate above has no effect.
     _SENT_CORE_BITS = _bits_of(SENTINEL_BUILDING_SCORE[core])
     _GUN_CORE_BITS_BY_STEP = _step_bits_tuple(GUNNER_BUILDING_SCORE[core])
-    global _cached_claims, _cached_best, cant_attack
+    global _cached_claims
     _cached_claims = _my_claims()
-    if not can_move:
-        # In-place retry: only placement tiles we can build on from right here
-        # (a cardinal neighbour) count -- everything else would need a move.
-        my_bit = 1 << (map_info._my_pos.x + map_info._my_pos.y * map_info._width)
-        _cached_claims &= map_info.expand_manhattan(my_bit) & ~my_bit
-    _cached_best = None
-    if _cached_claims:
-        # Validate reachability here so attack isn't selected (and a builder left
-        # idle at the top priority) when no placement tile can be reached. An
-        # adjacent good spot is dist<=1, so nav.closest catches the instant-build
-        # case too.
-        best, _ = nav.closest(_cached_claims)
-        if best is None:
-            cant_attack |= _cached_claims
-            _cached_claims = 0
-        else:
-            _cached_best = best
     return MAX_SCORE if _cached_claims else 0
 
 
@@ -1112,7 +1124,6 @@ def _try_instant_preferred(candidates: int) -> bool:
         return False
 
     reserve = map_info.ti_reserve()
-    reserve = 0
     ti_have = rc.get_global_resources()
     if best_type == EntityType.GUNNER:
         if rc.can_build_gunner(best_pos, best_dir) and ti_have >= rc.get_gunner_cost() + reserve:
@@ -1135,7 +1146,7 @@ def _try_launcher_lockdown(target: Position) -> bool:
     where placing a launcher (or barrier) maximally increases the closest
     enemy bot's pathing distance to us. Tiebreak: barrier > launcher (cheaper).
     Skip placement if no candidate strictly increases the distance."""
-    if not has_op():
+    if rc.get_action_cooldown() != 0:
         return False
     ti_have = rc.get_global_resources()
     reserve = map_info.ti_reserve()
@@ -1160,6 +1171,9 @@ def _try_launcher_lockdown(target: Position) -> bool:
     my_team = map_info._bm_team[my_team_idx]
 
     walls = map_info._bm_env[map_info._IDX_ENV_WALL]
+    # Florent has no ROAD entity (it exists only in the Cambridge ruleset this
+    # code was ported from), so there is never a road to build over.
+    my_road = 0
     my_barrier = bm_et[map_info._IDX_BARRIER] & my_team
 
     # Existing friendly launcher 3x3s and friendly barriers are already
@@ -1193,10 +1207,10 @@ def _try_launcher_lockdown(target: Position) -> bool:
     my_pos = map_info._my_pos
     my_bit = 1 << (my_pos.x + my_pos.y * w)
 
-    # Adjacent buildable tiles: empty, or our own barrier (the latter only used
-    # when placing a launcher; we'll destroy first).
+    # Adjacent buildable tiles: empty, our own road, or our own barrier
+    # (the latter only used when placing a launcher; we'll destroy first).
     candidates = map_info.expand_chebyshev(my_bit) & ~my_bit
-    candidates &= ((~map_info._bm_any_building) | my_barrier) & ~walls
+    candidates &= ((~map_info._bm_any_building) | my_road | my_barrier) & ~walls
     candidates &= ~map_info._bm_friendly_bots & ~map_info._bm_enemy_bots
     candidates &= ~map_info._bm_enemy_turret_threat
     if not candidates:
@@ -1254,9 +1268,10 @@ def _try_launcher_lockdown(target: Position) -> bool:
 
     if not options:
         return False
-    delta, _, kind, best_p, best_lsb = min(options, key=lambda o: (-o[0], -o[1]))
+    options.sort(key=lambda o: (-o[0], -o[1]))
+    delta, _, kind, best_p, best_lsb = options[0]
 
-    if (best_lsb & my_barrier) and rc.can_destroy(best_p):
+    if (best_lsb & (my_road | my_barrier)) and rc.can_destroy(best_p):
         rc.destroy(best_p)
         map_info.update_at(best_p)
 
@@ -1274,85 +1289,31 @@ def _try_launcher_lockdown(target: Position) -> bool:
         map_info.update_at(best_p)
         built = True
 
-    if built and has_op():
+    if built:
+        # Build uses action cooldown; move cooldown is independent — keep advancing.
         nav.move_to(target)
         return True
     return False
 
 
-def _best_placement_score(mask: int) -> int:
-    """Best turret score over the candidate tiles in `mask` (0 if empty)."""
-    w = map_info._width
-    best = 0
-    m = mask
-    while m:
-        lsb = m & -m
-        m ^= lsb
-        n = lsb.bit_length() - 1
-        _, _, s = get_best_direction(Position(n % w, n // w))
-        if s > best:
-            best = s
-    return best
-
-
-def _lookahead_step(candidates: int):
-    """One-tile look-ahead: for every direction we could walk, look at the tiles
-    adjacent to that walk spot (where we could place a turret NEXT turn). If the
-    best such placement beats the best we could place from HERE by at least
-    MIN_INCREASE_PER_TURN, return that walk spot to step onto; else None. Only
-    safe (non-lethal), empty, passable neighbours count as walk spots."""
-    my = map_info._my_pos
-    w, h = map_info._width, map_info._height
-    my_bit = 1 << (my.x + my.y * w)
-    now_best = _best_placement_score(candidates & map_info.manhattan(my_bit))
-    threshold = now_best + MIN_INCREASE_PER_TURN
-    passable = map_info.passable()
-    blocked = ((map_info._bm_friendly_bots | map_info._bm_enemy_bots) & ~my_bit
-               | map_info.lethal_mask(rc.get_hp()))
-    best_step = None
-    best_score = -1
-    for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-        nx, ny = my.x + dx, my.y + dy
-        if not (0 <= nx < w and 0 <= ny < h):
-            continue
-        nb = 1 << (nx + ny * w)
-        if not (passable & nb) or (blocked & nb):
-            continue                                   # can't stand there
-        s = _best_placement_score(candidates & map_info.manhattan(nb))
-        if s >= threshold and s > best_score:
-            best_score = s
-            best_step = Position(nx, ny)
-    return best_step
-
-
-def run(can_move=True):
+def run():
     global cant_attack
     log("ATTACK")
     candidates = _cached_claims
     if not candidates:
         return
 
-    # One-tile look-ahead: if stepping to a neighbour lets us place a turret next
-    # turn scoring MIN_INCREASE_PER_TURN better than anything we could place from
-    # here, take the step instead of building now.
-    if can_move:
-        step = _lookahead_step(candidates)
-        if step is not None:
-            log(f"Attack: stepping to {step} for a stronger turret next turn")
-            nav.move_to(step)
-            return
+    # If a cardinally-adjacent empty tile is a good build spot, build there now.
+    # (We can't move and build the same turn, so this only fires when already in
+    # position.)
+    if _try_instant_preferred(candidates):
+        return
 
-    # Move into position first. bfs_move keeps us put when we're already adjacent
-    # to our target and safe, but steps us off our tile if it's now lethal -- so
-    # we flee instead of standing in fire to build a turret and dying. Only build
-    # in place when we didn't need to move.
-    best = _cached_best
-    if best is not None:
-        log(f"Attack: moving toward {best}")
-        if nav.move_adjacent(best, can_move=can_move):
-            return
-
-    # In position (or no specific approach target): if a cardinally-adjacent empty
-    # tile is a good build spot, build there now. (We can't move and build the same
-    # turn, so this only lands when we're already in position.)
-    _try_instant_preferred(candidates)
+    # Otherwise path one step toward being cardinally adjacent to the best
+    # candidate; we'll build next turn once in position.
+    best, _ = nav.closest(candidates)
+    if best is None:
+        cant_attack |= candidates
+        return
+    log(f"Attack: moving toward {best}")
+    nav.move_adjacent(best)
