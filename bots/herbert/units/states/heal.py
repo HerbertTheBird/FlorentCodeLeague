@@ -43,6 +43,13 @@ MAX_HEAL_DIST = 12
 # costs titanium + a cooldown, so topping off a 1-2 point dent is wasteful.
 HEAL_MIN_DAMAGE = 2
 
+# The core has a huge HP pool. While it's still this healthy we DON'T chase it as
+# a real heal target (it competes with far more fragile buildings); an idle builder
+# may top it off, but only as a last-resort low-priority job worth CORE_IDLE_SCORE.
+# Below the threshold the core heals like any other building.
+CORE_HEAL_HP = 350
+CORE_IDLE_SCORE = 1.25
+
 
 def init(c: Controller):
     global rc, nav
@@ -137,6 +144,23 @@ def _damage_over(mask: int, threshold: int) -> int:
     return result
 
 
+def _core_hp() -> int:
+    """Max HP reported across our core's 2x2 cells (all live cells share the core's
+    HP; max() just skips any unknown -1). A large sentinel if we have no core."""
+    core = map_info._bm_my_core_area
+    if not core:
+        return 1 << 30
+    hp = -1
+    m = core
+    while m:
+        b = m & -m
+        m ^= b
+        v = map_info._building_hp[b.bit_length() - 1]
+        if v > hp:
+            hp = v
+    return hp if hp >= 0 else (1 << 30)
+
+
 def _find_target():
     my = map_info._bm_team[map_info._my_team_idx]
     my_pos = map_info._my_pos
@@ -145,6 +169,11 @@ def _find_target():
     enemy_bots = map_info._bm_enemy_bots
 
     damaged_any = my & map_info._bm_damaged & map_info._bm_visible
+    # While the core is still healthy (>= CORE_HEAL_HP) it isn't a real heal target
+    # -- drop it from the candidates. score() offers a low-priority idle top-off
+    # instead. Below the threshold it stays in and heals like anything else.
+    if _core_hp() >= CORE_HEAL_HP:
+        damaged_any &= ~map_info._bm_my_core_area
     # A lightly-dented building (<= HEAL_MIN_DAMAGE) is only worth pursuing if an
     # enemy builder is adjacent to it -- that enemy will keep chipping it, so we
     # want to already be in position when the damage grows past the threshold.
@@ -341,12 +370,29 @@ _cached_target = None
 
 def _adjacent_multi_damaged() -> bool:
     """True if I'm cardinally adjacent to at least 2 of my own buildings that are
-    not at full HP."""
+    not at full HP. A still-healthy core (>= CORE_HEAL_HP) doesn't count."""
     my = map_info._bm_team[map_info._my_team_idx]
     my_pos = map_info._my_pos
     my_bit = 1 << (my_pos.x + my_pos.y * map_info._width)
-    adj_damaged = map_info.manhattan(my_bit) & my & map_info._bm_damaged
+    dmg = map_info._bm_damaged
+    if _core_hp() >= CORE_HEAL_HP:
+        dmg = dmg & ~map_info._bm_my_core_area
+    adj_damaged = map_info.manhattan(my_bit) & my & dmg
     return adj_damaged.bit_count() >= 2
+
+
+def _idle_core_target():
+    """Nearest reachable core tile to top off when the core is dented but still
+    healthy (>= CORE_HEAL_HP), else None. Heal's last-resort idle job."""
+    core_area = map_info._bm_my_core_area
+    if not core_area:
+        return None
+    if not (core_area & map_info._bm_damaged & map_info._bm_visible):
+        return None                            # core not dented -> nothing to do
+    if _core_hp() < CORE_HEAL_HP:
+        return None                            # already a normal target
+    tgt, _ = nav.closest_within(core_area, max_dist=MAX_HEAL_DIST)
+    return tgt
 
 
 def score(can_move=True):
@@ -365,7 +411,16 @@ def score(can_move=True):
     # us in position / lets run() finish the move if we aren't adjacent yet.)
     if _adjacent_multi_damaged():
         return MAX_SCORE
-    return NORMAL_SCORE if _cached_target is not None else 0
+    if _cached_target is not None:
+        return NORMAL_SCORE
+    # Nothing urgent to heal. If our core is dented but still healthy, top it off
+    # at a very low priority -- so an otherwise-idle builder tends it, but any real
+    # work (disrupt and up) preempts it.
+    core_target = _idle_core_target()
+    if core_target is not None:
+        _cached_target = core_target
+        return CORE_IDLE_SCORE
+    return 0
 
 
 def _hold_or_flee():

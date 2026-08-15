@@ -652,6 +652,7 @@ class Pathing:
         (i.e. "act now") only when we're already cardinally adjacent to pos, True
         ("bail, can't act from here") otherwise. Keeps the caller's usual
         `if move_adjacent(...): return` shape working unchanged."""
+        log("move adjacent", pos)
         if not can_move:
             my = map_info._my_pos
             return abs(my.x - pos.x) + abs(my.y - pos.y) != 1

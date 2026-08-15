@@ -265,24 +265,18 @@ def score(can_move=True):
     # while a plan is still going up.
     _cached_plan_action = _plan_next_action()
     if _cached_plan_action is not None:
-        # The opening plan assumes we're building in a vacuum. The moment that
-        # stops being true -- our tile falls under enemy turret threat, or we can
-        # see an enemy builder bot -- abandon the plan for good and fall through to
-        # normal state scoring, so combat/economy states respond to what's in front
-        # of us now instead of blindly finishing a pre-combat build order.
-        my_pos = map_info._my_pos
-        my_bit = 1 << (my_pos.x + my_pos.y * map_info._width)
-        if (map_info._bm_enemy_turret_threat & my_bit) or map_info._bm_enemy_bots:
-            units.builder.conveyor_plan = None
+        # Keep building the opening plan at route's tier. We DON'T bail on it just
+        # because an enemy or turret threat showed up -- we only give it up once the
+        # builder is actually pulled into heal or attack (builder.run clears
+        # conveyor_plan for good the turn that happens), after which _plan_next_action
+        # returns None and we fall through to normal routing.
+        _cached_target = None
+        # In-place retry: only if the next plan piece is buildable right here
+        # (action[1] is the tile it places -- conveyor pos or harvester ore).
+        if not can_move and not _adjacent_to_me(_cached_plan_action[1]):
             _cached_plan_action = None
-        else:
-            _cached_target = None
-            # In-place retry: only if the next plan piece is buildable right here
-            # (action[1] is the tile it places -- conveyor pos or harvester ore).
-            if not can_move and not _adjacent_to_me(_cached_plan_action[1]):
-                _cached_plan_action = None
-                return 0
-            return MAX_SCORE
+            return 0
+        return MAX_SCORE
     units.builder.draw_mask(map_info._bm_dead_end, 0, 0, 255)
     _cached_target = _find_route_target()
     if _cached_target is not None and not can_move and not _adjacent_to_me(_cached_target[0]):

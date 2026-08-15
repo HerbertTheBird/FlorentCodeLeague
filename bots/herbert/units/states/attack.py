@@ -50,11 +50,11 @@ def init(c: Controller):
 
 SENTINEL_BUILDING_SCORE = [0] * map_info._NUM_ET
 SENTINEL_BUILDING_SCORE[map_info._IDX_CORE] = 32 #duplicate value
-SENTINEL_BUILDING_SCORE[map_info._IDX_HARVESTER] = 48
-SENTINEL_BUILDING_SCORE[map_info._IDX_GUNNER] = 32
+SENTINEL_BUILDING_SCORE[map_info._IDX_HARVESTER] = 16
+SENTINEL_BUILDING_SCORE[map_info._IDX_GUNNER] = 16
 SENTINEL_BUILDING_SCORE[map_info._IDX_SENTINEL] = 32
 SENTINEL_BUILDING_SCORE[map_info._IDX_LAUNCHER] = 16
-SENTINEL_BUILDING_SCORE[map_info._IDX_CONVEYOR] = 8
+SENTINEL_BUILDING_SCORE[map_info._IDX_CONVEYOR] = 4
 SENTINEL_BUILDING_SCORE[map_info._IDX_BARRIER] = 6
 SENTINEL_BUILDING_SCORE[map_info._IDX_SPLITTER] = SENTINEL_BUILDING_SCORE[map_info._IDX_CONVEYOR]
 
@@ -123,6 +123,10 @@ SCORE_THRESHOLD_FACTOR = 0.25
 MIN_ATTACK_SCORE = 32
 THREAT_PENALTY = 4
 NON_GOOD_TILE_BUFF = 6
+# Look-ahead: only give up placing a turret THIS turn to step one tile for a
+# better spot NEXT turn if the better spot's score beats what we could place now
+# by at least this much -- otherwise the one-turn delay isn't worth it.
+MIN_INCREASE_PER_TURN = 4
 
 # Extra score for hitting an ENEMY conveyor that is actively carrying titanium,
 # scaled by how loaded it is (map_info.conv_load_buckets). A fully-loaded belt
@@ -130,7 +134,7 @@ NON_GOOD_TILE_BUFF = 6
 # Makes turrets prefer cutting the enemy's live supply over idle infrastructure.
 # Values are a starting point -- tune freely.
 TI_SCORE_INCREASE_GUNNER = 32
-TI_SCORE_INCREASE_SENTINEL = 32
+TI_SCORE_INCREASE_SENTINEL = 12
 
 # Gunner-only knobs. Distance discount: the enemy on the tile directly in front
 # of the gunner (ray-step 0) counts full; every tile further back counts half.
@@ -878,6 +882,7 @@ def _ensure_round_cache():
     _round_cache_gunner_planes = None
     ti = rc.get_global_resources()
     reserve = map_info.ti_reserve()
+    reserve = 0
     _round_cache_can_afford_sent = ti >= rc.get_sentinel_cost() + reserve
     _round_cache_can_afford_gun = ti >= rc.get_gunner_cost() + reserve
     _round_cache_attack_candidates = _get_attack_candidates()
@@ -1082,6 +1087,7 @@ def _try_instant_preferred(candidates: int) -> bool:
         return False
 
     reserve = map_info.ti_reserve()
+    reserve = 0
     ti_have = rc.get_global_resources()
     if best_type == EntityType.GUNNER:
         if rc.can_build_gunner(best_pos, best_dir) and ti_have >= rc.get_gunner_cost() + reserve:
@@ -1249,12 +1255,67 @@ def _try_launcher_lockdown(target: Position) -> bool:
     return False
 
 
+def _best_placement_score(mask: int) -> int:
+    """Best turret score over the candidate tiles in `mask` (0 if empty)."""
+    w = map_info._width
+    best = 0
+    m = mask
+    while m:
+        lsb = m & -m
+        m ^= lsb
+        n = lsb.bit_length() - 1
+        _, _, s = get_best_direction(Position(n % w, n // w))
+        if s > best:
+            best = s
+    return best
+
+
+def _lookahead_step(candidates: int):
+    """One-tile look-ahead: for every direction we could walk, look at the tiles
+    adjacent to that walk spot (where we could place a turret NEXT turn). If the
+    best such placement beats the best we could place from HERE by at least
+    MIN_INCREASE_PER_TURN, return that walk spot to step onto; else None. Only
+    safe (non-lethal), empty, passable neighbours count as walk spots."""
+    my = map_info._my_pos
+    w, h = map_info._width, map_info._height
+    my_bit = 1 << (my.x + my.y * w)
+    now_best = _best_placement_score(candidates & map_info.manhattan(my_bit))
+    threshold = now_best + MIN_INCREASE_PER_TURN
+    passable = map_info.passable()
+    blocked = ((map_info._bm_friendly_bots | map_info._bm_enemy_bots) & ~my_bit
+               | map_info.lethal_mask(rc.get_hp()))
+    best_step = None
+    best_score = -1
+    for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+        nx, ny = my.x + dx, my.y + dy
+        if not (0 <= nx < w and 0 <= ny < h):
+            continue
+        nb = 1 << (nx + ny * w)
+        if not (passable & nb) or (blocked & nb):
+            continue                                   # can't stand there
+        s = _best_placement_score(candidates & map_info.manhattan(nb))
+        if s >= threshold and s > best_score:
+            best_score = s
+            best_step = Position(nx, ny)
+    return best_step
+
+
 def run(can_move=True):
     global cant_attack
     log("ATTACK")
     candidates = _cached_claims
     if not candidates:
         return
+
+    # One-tile look-ahead: if stepping to a neighbour lets us place a turret next
+    # turn scoring MIN_INCREASE_PER_TURN better than anything we could place from
+    # here, take the step instead of building now.
+    if can_move:
+        step = _lookahead_step(candidates)
+        if step is not None:
+            log(f"Attack: stepping to {step} for a stronger turret next turn")
+            nav.move_to(step)
+            return
 
     # Move into position first. bfs_move keeps us put when we're already adjacent
     # to our target and safe, but steps us off our tile if it's now lethal -- so

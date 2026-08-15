@@ -231,7 +231,7 @@ def select_best_state(can_move=True, exclude=None):
 
 
 def run():
-    global _stay_near_core, _first_run_done, _plan_read
+    global _stay_near_core, _first_run_done, _plan_read, conveyor_plan
 
     # Sync round info
     current_round = rc.get_current_round()
@@ -262,6 +262,11 @@ def run():
 
     # Run state-specific logic.
     best_state = select_best_state()
+    # The opening conveyor plan is a pre-combat build order; the moment this builder
+    # is actually pulled into a fight (heal or attack), that plan is stale -- throw
+    # it away for good so it never resumes, and route falls to normal routing.
+    if best_state is heal or best_state is attack:
+        conveyor_plan = None
     best_state.run()
 
     heal._do_best_heal()

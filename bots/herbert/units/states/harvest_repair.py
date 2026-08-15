@@ -192,7 +192,7 @@ def run(can_move=True):
     if map_info._bm_team[my_team_idx] & ore_bit and rc.can_destroy(best_ore) and has_op():
         rc.destroy(best_ore)
         map_info.update_at(best_ore)
-
+    log(rc.get_global_resources(), rc.get_harvester_cost(), map_info.ti_reserve())
     if rc.can_build_harvester(best_ore) and rc.get_global_resources() >= rc.get_harvester_cost() + map_info.ti_reserve():
         p0 = path[0]
         # Make sure we don't block ourselves off from the start of the path
