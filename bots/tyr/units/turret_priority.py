@@ -2,13 +2,11 @@
 rotation decisions.
 
 Priority buckets (lowest number = best):
-  1. Enemy sentinel/gunner that threatens one of my sentinels/gunners.
-  2. Enemy sentinel/gunner.
-  3. Enemy builder bot.
-  4. Enemy harvester, or an enemy conveyor carrying ore
-     (map_info._bm_ti_carrying — the up/downstream carrying set).
-  5. Enemy launcher.
-  6. Enemy core (last — chipped only when nothing better is in range).
+  1. Enemy conveyor cardinally beside a harvester, carrying ore, or a known
+     loaded downstream feeder into the enemy core. Harvesters are never targets.
+  2. Enemy builder bot.
+  3. Enemy launcher.
+  4. Enemy core. Enemy turrets are deliberately ignored; repair is cheaper.
 
 Anything not in one of these six buckets is not targeted. Tiebreaks within a
 bucket: one-shot first, then furthest from the nearest enemy builder bot, then
@@ -18,7 +16,8 @@ weight (HP as sub-tiebreak).
 from main import has_op
 from fcode import EntityType, Position
 import map_info
-from log import DEBUG_LOGGING, log
+import units.economic_targets as economic_targets
+from log import log
 
 
 def _turret_et_for_idx(idx: int):
@@ -82,23 +81,21 @@ def compute_priority_sets(rc) -> dict:
     enemy_gs = gs & enemy
     my_gs = gs & mine
 
-    threatening = _threatening_enemy_turrets(rc, enemy_gs, my_gs)
-
     enemy_bots = map_info._bm_enemy_bots
 
-    enemy_harvesters = bm_et[map_info._IDX_HARVESTER] & enemy
     enemy_carrying_conv = map_info._bm_conveyors & map_info._bm_ti_carrying & enemy
+    harvester_conveyors, loaded_core_feeders = economic_targets.masks()
 
     enemy_launcher = bm_et[map_info._IDX_LAUNCHER] & enemy
     enemy_core = bm_et[map_info._IDX_CORE] & enemy
 
     return {
-        1: threatening,
-        2: enemy_gs,
-        3: enemy_bots,
-        4: enemy_harvesters | enemy_carrying_conv,
-        5: enemy_launcher,
-        6: enemy_core,
+        1: enemy_carrying_conv | harvester_conveyors | loaded_core_feeders,
+        2: enemy_bots,
+        3: enemy_launcher,
+        4: enemy_core,
+        5: 0,
+        6: 0,
     }
 
 
@@ -108,24 +105,23 @@ def _apply_tiebreaks(pool, nav, one_shot_hp: int, enemy_bots: int, label: str):
     if not pool:
         return None
 
-    if DEBUG_LOGGING:
-        def _dist(c):
-            if not enemy_bots:
-                return None
-            _, d = nav.closest(enemy_bots, pos=c[0])
-            return d  # -1 means unreachable
+    def _dist(c):
+        if not enemy_bots:
+            return None
+        _, d = nav.closest(enemy_bots, pos=c[0])
+        return d  # -1 means unreachable
 
-        def _fmt_dist(d):
-            if d is None:
-                return "n/a"
-            if d == -1:
-                return "inf"
-            return str(d)
+    def _fmt_dist(d):
+        if d is None:
+            return "n/a"
+        if d == -1:
+            return "inf"
+        return str(d)
 
-        log(f"  [{label}] pool size={len(pool)}: " + ", ".join(
-            f"({c[0].x},{c[0].y}) et={c[4].value} w={c[2]} hp={c[3]} d={_fmt_dist(_dist(c))}"
-            for c in pool
-        ))
+    log(f"  [{label}] pool size={len(pool)}: " + ", ".join(
+        f"({c[0].x},{c[0].y}) et={c[4].value} w={c[2]} hp={c[3]} d={_fmt_dist(_dist(c))}"
+        for c in pool
+    ))
     one_shots = [c for c in pool if c[3] <= one_shot_hp]
     if one_shots:
         log(f"  [{label}] one-shot filter ({one_shot_hp}): {len(one_shots)}/{len(pool)} kept")
@@ -141,10 +137,9 @@ def _apply_tiebreaks(pool, nav, one_shot_hp: int, enemy_bots: int, label: str):
             if dist == -1:
                 dist = 1 << 30
             scored.append((dist, c))
-        if DEBUG_LOGGING:
-            log(f"  [{label}] dist-to-enemy-bot: " + ", ".join(
-                f"({c[0].x},{c[0].y})={d if d < (1<<29) else 'inf'}" for d, c in scored
-            ))
+        log(f"  [{label}] dist-to-enemy-bot: " + ", ".join(
+            f"({c[0].x},{c[0].y})={d if d < (1<<29) else 'inf'}" for d, c in scored
+        ))
         max_dist = max(s[0] for s in scored)
         pool = [c for d, c in scored if d == max_dist]
         log(f"  [{label}] furthest-from-bot ({max_dist if max_dist < (1<<29) else 'inf'}): {len(pool)} kept")
@@ -270,18 +265,3 @@ def select_best(candidates, priority_sets, nav, one_shot_hp: int,
             return chosen
     log("select_best: no winner")
     return None
-
-
-def scrap_if_idle(rc) -> bool:
-    """Self-destruct a turret that has become dead weight: the caller has nothing
-    to shoot this turn, and the turret sees no enemy bots and at most 2 enemy
-    buildings. Such a turret's targets are gone, so recycle it. Returns True if it
-    self-destructed.
-
-    'Sees' means the turret's current vision: enemy bots via map_info tracking,
-    enemy buildings via the controller's nearby-building list (distinct entities,
-    so a 2x2 enemy core counts once)."""
-    if map_info._bm_enemy_bots:
-        return False
-    rc.self_destruct()
-    return True

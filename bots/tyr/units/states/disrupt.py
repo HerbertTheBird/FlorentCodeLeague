@@ -35,33 +35,29 @@ def _my_claims():
 # against Khaos). Builders pulled off routing to go wall distant ore are not
 # paying for themselves. Left at 2, where it only fires with nothing else to do.
 MAX_SCORE = 2
-_cached_target = None
-def score(can_move=True):
-    global _cached_target
-    _cached_target = None
-    # Can't afford a barrier (+ the defender reserve) -> don't select the state.
-    if rc.get_global_resources() < rc.get_barrier_cost() + map_info.ti_reserve():
+_cached_claims = 0
+def score():
+    global _cached_claims
+    if units.builder._econ_only:
+        _cached_claims = 0
         return 0
-    claims = _my_claims()
-    if not can_move:
-        # In-place retry: only a target we can barrier from right here counts.
-        claims &= map_info.manhattan(1 << (map_info._my_pos.x + map_info._my_pos.y * map_info._width))
-    if claims:
-        best, _ = nav.closest(claims)       # nearest reachable target
-        if best is not None:
-            _cached_target = best
-    return MAX_SCORE if _cached_target is not None else 0
+    _cached_claims = _my_claims()
+    return 2 if _cached_claims else 0
 
-def run(can_move=True):
-    best = _cached_target
+def run():
+    log("DISRUPT")
+    available = _cached_claims
+    if not available:
+        return
+
+    best, _ = nav.closest(available)
     if best is None:
         return
-    log("DISRUPT")
 
-    # Move into position first (a no-op if we're already adjacent and safe, a
-    # forced step off our tile if it's lethal); only build if we didn't move.
-    if nav.move_adjacent(best, can_move=can_move):
-        return
+    width = map_info._width
+
+    best_n = best.x + best.y * width
+    nav.move_adjacent(best)
     if rc.can_build_barrier(best) and rc.get_global_resources() >= rc.get_barrier_cost() + map_info.ti_reserve():
         rc.build_barrier(best)
         map_info.update_at(best)

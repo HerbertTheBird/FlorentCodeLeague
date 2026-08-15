@@ -7,11 +7,21 @@ import conveyor_plan
 import pathing
 from pathing import Pathing
 from units.spawn_plan import choose_fanout_plan, INITIAL_SPAWN_COUNT
+from fcode import GameConstants
 import sys
 rc: Controller
 
 # --- Configurable ---
-SCALE_MULT = 1
+SCALE_MULT = 0.8
+# A builder bot sees tiles within this squared distance, so an ally within it of
+# the attacked tile can already respond -- no defensive spawn needed.
+BUILDER_VISION_SQ = GameConstants.BUILDER_BOT_VISION_RADIUS_SQ
+
+# Only pull a fresh defender for a building that's actually in danger: one an enemy
+# is next to AND that has dropped below this HP. A lightly-scratched building can
+# wait, so it doesn't trigger a spawn.
+DEFENSE_HP_THRESHOLD = 14
+
 _starting_convs: list[tuple[int]] = []
 # Direction from the core to each starting-conv ore group, aligned with
 # `_starting_convs`. Set by `starting_convs()`; used to seed the fan-out spread.
@@ -64,10 +74,185 @@ def _spawn_toward_center() -> bool:
 
 def _spawn_toward_dir(core_pos: Position, direction: Direction) -> bool:
     """Spawn on the surrounding tile best aligned with `direction`. Aims well past
-    the 2x2 footprint so the closest spawn tile is the one on that bearing."""
+    the 2x2 footprint so the closest spawn tile is the one on that bearing, but
+    CLAMPS the aim point onto the board: a core near an edge would otherwise aim
+    off-map, and bfs_dist's `1 << (x + y*w)` throws on a negative coordinate."""
     dx, dy = map_info._DIRECTION_DELTAS[direction]
-    target = Position(core_pos.x + dx * 8, core_pos.y + dy * 8)
-    return _spawn_best_toward(target)
+    tx = min(max(core_pos.x + dx * 8, 0), map_info._width - 1)
+    ty = min(max(core_pos.y + dy * 8, 0), map_info._height - 1)
+    return _spawn_best_toward(Position(tx, ty))
+
+
+# ---------------------------------------------------------------------------
+# Defensive spawn: an enemy builder bot near our core is attacking a building
+# there. We cancel each attacking enemy against the closest friendly builder that
+# can SEE it (one friendly answers one enemy) -- and if any attackers are left
+# over (we're outnumbered, or no friendly is close enough to see them), we spawn a
+# defender toward the nearest-core building those leftovers are hitting. Counting
+# instead of "is any ally nearby?" means a lone defender no longer suppresses the
+# spawn while several enemies pile on.
+# ---------------------------------------------------------------------------
+def _ally_positions():
+    """Where our ally builders are: the comms global array, plus any the core
+    sees directly (a fresh builder without a comms slot yet)."""
+    positions = list(comms.ally_positions())
+    fb = map_info._bm_friendly_bots
+    w = map_info._width
+    while fb:
+        b = fb & -fb
+        fb ^= b
+        n = b.bit_length() - 1
+        positions.append(Position(n % w, n // w))
+    return positions
+
+
+def _dist_to_core(x: int, y: int) -> int:
+    """Manhattan distance from (x, y) to the 2x2 core footprint."""
+    core = map_info._my_core
+    if core is None:
+        return 0
+    cx = core.x if x < core.x else (core.x + 1 if x > core.x + 1 else x)
+    cy = core.y if y < core.y else (core.y + 1 if y > core.y + 1 else y)
+    return abs(x - cx) + abs(y - cy)
+
+
+def _find_defense_target():
+    """Tile near our core that a defender is needed at, or None.
+
+    An enemy builder bot is "attacking" if it sits next to a damaged friendly
+    building the core can see. We pair each such attacker with the closest DISTINCT
+    friendly builder that can see it -- that friendly is assumed to answer it.
+    Whatever attackers remain unpaired (we're outnumbered, or no friendly is close
+    enough to see them) are the ones a fresh spawn must meet; we aim it at the
+    nearest-core building one of them is hitting. Nearest-core target wins."""
+    if map_info._bm_my_core_area == 0:
+        return None
+    enemy_bots = map_info._bm_enemy_bots
+    if not enemy_bots:
+        return None
+    my = map_info._bm_team[map_info._my_team_idx]
+    w = map_info._width
+    # Friendly buildings the core can see (i.e. near it) that are damaged and sit
+    # next to an enemy builder bot -- actively being attacked.
+    attacked = (my & map_info._bm_any_building & map_info._bm_damaged
+                & map_info._bm_visible & map_info.manhattan(enemy_bots))
+    if not attacked:
+        return None
+    # Keep only the ones actually in danger -- below DEFENSE_HP_THRESHOLD. A
+    # building an enemy is chipping but that's still healthy can wait.
+    danger = 0
+    m = attacked
+    while m:
+        b = m & -m
+        m ^= b
+        if map_info._building_hp[b.bit_length() - 1] < DEFENSE_HP_THRESHOLD:
+            danger |= b
+    attacked = danger
+    if not attacked:
+        return None
+    # The enemy bbots doing the attacking: those adjacent to an attacked building.
+    attacker_mask = enemy_bots & map_info.manhattan(attacked)
+    attackers = []
+    m = attacker_mask
+    while m:
+        b = m & -m
+        m ^= b
+        n = b.bit_length() - 1
+        attackers.append((n % w, n // w))
+    if not attackers:
+        return None
+
+    # Cancel each attacker against the closest friendly builder that can see it; a
+    # friendly answers only one attacker. The leftovers are what we're outnumbered
+    # by and must spawn against.
+    allies = _ally_positions()
+    uncancelled = 0
+    unc_mask = 0
+    for (ex, ey) in attackers:
+        best_i = -1
+        best_d = None
+        for i, ap in enumerate(allies):
+            dx = ap.x - ex
+            dy = ap.y - ey
+            d2 = dx * dx + dy * dy
+            if d2 <= BUILDER_VISION_SQ and (best_d is None or d2 < best_d):
+                best_d = d2
+                best_i = i
+        if best_i >= 0:
+            allies.pop(best_i)             # this friendly is spoken for
+        else:
+            uncancelled += 1
+            unc_mask |= 1 << (ex + ey * w)
+    if uncancelled == 0:
+        return None
+
+    # Spawn toward the attacked building nearest our core that a still-uncancelled
+    # attacker is next to (fall back to any attacked building if the intersection
+    # is somehow empty).
+    targets = attacked & map_info.manhattan(unc_mask)
+    if not targets:
+        targets = attacked
+    best = None
+    best_key = None
+    m = targets
+    while m:
+        b = m & -m
+        m ^= b
+        n = b.bit_length() - 1
+        x, y = n % w, n // w
+        key = _dist_to_core(x, y)
+        if best_key is None or key < best_key:
+            best_key = key
+            best = Position(x, y)
+    return best
+
+
+def _spawn_toward_adjacent(tile: Position) -> bool:
+    """Spawn a builder on the surrounding tile with the least BFS distance to
+    STANDING on a tile adjacent to `tile`. Returns True if one was spawned.
+
+    A spawn tile that is itself adjacent to `tile` is distance 0 -- so we multi-
+    source BFS out from the adjacency set and take the first spawn tile the flood
+    actually lands on (not merely reaches the side of, which is what nav.closest
+    measures and which picked a tile one step too far)."""
+    w, h = map_info._width, map_info._height
+    passable = map_info.passable()
+    adj = 0
+    for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+        x, y = tile.x + dx, tile.y + dy
+        if 0 <= x < w and 0 <= y < h:
+            adj |= 1 << (x + y * w)
+    adj &= passable
+    if not adj:
+        return False
+    spawn_mask = 0
+    for p in _spawn_tiles:
+        if rc.can_spawn(p):
+            spawn_mask |= 1 << (p.x + p.y * w)
+    if not spawn_mask:
+        return False
+
+    # BFS out from the adjacency tiles; the first spawn tile the flood enters is
+    # the one reachable in the fewest steps (0 if it IS an adjacency tile). Spawn
+    # tiles must be enterable, so fold them into the traversable set.
+    trav = passable | spawn_mask
+    frontier = adj
+    visited = adj
+    best_spawn = None
+    while frontier:
+        hit = frontier & spawn_mask
+        if hit:
+            n = (hit & -hit).bit_length() - 1
+            best_spawn = Position(n % w, n // w)
+            break
+        frontier = map_info.expand_manhattan(frontier) & trav & ~visited
+        visited |= frontier
+    if best_spawn is None or not rc.can_spawn(best_spawn):
+        return False
+    rc.spawn_builder(best_spawn)
+    log(f"core spawned defender at {best_spawn} toward attacked {tile}")
+    return True
+
 
 from math import inf
 
@@ -328,17 +513,31 @@ def starting_convs():
             for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1))
         )
     ]
-    while len(nearby_ore) > 4:
+    # Merge the closest ore groups until there are at most INITIAL_SPAWN_COUNT
+    # (4) of them: the opening spawns one starting-conv builder per group and
+    # fans the rest out to that same budget, so a 5th group would mean a 5th
+    # conv builder we never budgeted for (and used to crash on colors[4]).
+    # Only merge pairs whose COMBINED size stays <= 4 ores -- solve_gst raises on
+    # a group with more than 4 ores. If no size-legal merge remains but we still
+    # have too many groups (very ore-dense map), keep the 4 largest and leave the
+    # rest to the normal harvest/route states.
+    MAX_GROUP_ORES = 4
+    while len(nearby_ore) > INITIAL_SPAWN_COUNT:
         closest = [100000, -1, -1]
         for i in range(len(nearby_ore)):
             for j in range(i + 1, len(nearby_ore)):
+                if len(nearby_ore[i]) + len(nearby_ore[j]) > MAX_GROUP_ORES:
+                    continue                          # would exceed solve_gst's cap
                 sum_dist = sum(sum(nav.bfs_dist(p1, p2, False) for p1 in nearby_ore[i]) for p2 in nearby_ore[j])
                 if sum_dist < closest[0]:
                     closest = [sum_dist, i, j]
+        if closest[1] < 0:
+            break                                     # no size-legal merge left
         i, j = closest[1], closest[2]
         nearby_ore[i].extend(nearby_ore[j])
         del nearby_ore[j]
     nearby_ore.sort(key=len, reverse=True)
+    del nearby_ore[INITIAL_SPAWN_COUNT:]              # never exceed the builder budget
     import time
 
     avoid_mask = 0
@@ -352,9 +551,15 @@ def starting_convs():
         gdir = None
         if dist != inf:
             avoid_mask |= path_mask
-            draw_edges(edges, colors[i][0], colors[i][1], colors[i][2])
+            # Debug colouring only. There can be up to 5 ore groups (the merge
+            # loop caps at 5) but `colors` has 4 entries, so index by modulo --
+            # `colors[i]` threw IndexError on 5-group maps and, because it runs
+            # inside starting_convs(), aborted the whole opening plan -> the core
+            # never spawned and the game collected 0 titanium.
+            col = colors[i % len(colors)]
+            draw_edges(edges, col[0], col[1], col[2])
             for j in a:
-                rc.draw_indicator_dot(j, colors[i][0], colors[i][1], colors[i][2])
+                rc.draw_indicator_dot(j, col[0], col[1], col[2])
             # Bearing from the core to this ore group's centroid -- the direction
             # the builder assigned here effectively heads, used to seed the
             # fan-out spread for the leftover opening builders.
@@ -434,10 +639,22 @@ def run():
     comms.write()   # broadcast our word -- the queued plan if we spawned a root
 
     titanium = rc.get_global_resources()
-    if titanium >= rc.get_scale_percent() * SCALE_MULT:
+
+    # On-demand defence takes priority over every economic/fan-out spawn: the
+    # whole point of reserving a builder's cost (map_info.ti_reserve) is that
+    # this spawn is always affordable the round it is needed. Only one builder
+    # can spawn per turn, so this only fires when the opening didn't spawn a
+    # conv-root this turn.
+    defense_target = _find_defense_target()
+    map_info.arm_reserve(defense_target is not None)
+    spawned_defense = False
+    if defense_target is not None and not spawned_conv:
+        spawned_defense = _spawn_toward_adjacent(defense_target)
+
+    if (not spawned_conv and not spawned_defense
+            and titanium >= rc.get_scale_percent() * SCALE_MULT):
         if r < num_groups:
-            if not spawned_conv:
-                _spawn_toward_center()
+            _spawn_toward_center()
         else:
             # Ran out of ore groups: fan the remaining opening builders out along
             # the precomputed spread bearings (falling back to center if the best
@@ -448,7 +665,7 @@ def run():
                     _spawn_toward_center()
 
     # Ammount of ammo we want to have
-    target_ammo_ammount = min(min(30, rc.get_global_resources()), rc.get_current_round() * 2)
+    target_ammo_ammount = min(min(30, rc.get_global_resources()-4), rc.get_current_round() * 2)
 
     # Convert titanium into ammo if we want more
     ammo_amount = target_ammo_ammount - rc.get_global_ammo()

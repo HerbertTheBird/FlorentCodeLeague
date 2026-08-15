@@ -20,56 +20,33 @@ def init(c: Controller):
     nav = units.builder.nav
 
 MAX_SCORE = 1
-def score(can_move=True):
-    # Explore is pure movement -- nothing to do in place.
-    return 0 if not can_move else 1
-
-# How many targets we're willing to burn on a failed move in one turn.
-MOVE_ATTEMPTS = 1
-
-# Walk to the pick-th set bit a chunk at a time; clearing one bit at a time costs
-# a full-width bigint op per step on a 900-tile board.
-_CHUNK = 64
-_CHUNK_MASK = (1 << _CHUNK) - 1
-
-
-def _random_tile(mask: int):
-    """Uniformly pick one set bit of `mask` and return it as a Position, or None
-    if `mask` is empty."""
-    count = mask.bit_count()
-    if count == 0:
-        return None
-    pick = random.randint(0, count - 1)
-    base = 0
-    while True:
-        chunk = mask & _CHUNK_MASK
-        c = chunk.bit_count()
-        if pick < c:
-            break
-        pick -= c
-        mask >>= _CHUNK
-        base += _CHUNK
-    for _ in range(pick):
-        chunk &= chunk - 1
-    n = base + (chunk & -chunk).bit_length() - 1
-    w = map_info._width
-    return Position(n % w, n // w)
-
+def score():
+    return 1
 
 def generate_explore_target():
     global explore_target
     w = map_info._width
     nlc = map_info._not_left_col
     nrc = map_info._not_right_col
-    avoid = map_info.get_avoid(False)
+    board = (1 << (w * map_info._height)) - 1
     if units.builder._stay_near_core:
         near = units.builder.near_core_mask()
-        # Prefer reachable tiles near the core, but settle for any of them.
-        pos = _random_tile(near & ~avoid or near)
-        if pos is not None:
-            explore_target = pos
+        avoid = map_info.get_avoid(False)
+        candidates = near & ~avoid
+        if not candidates:
+            candidates = near
+        if candidates:
+            count = candidates.bit_count()
+            pick = random.randint(0, count - 1)
+            mask = candidates
+            for _ in range(pick):
+                mask &= mask - 1
+            lsb = mask & -mask
+            n = lsb.bit_length() - 1
+            explore_target = Position(n % w, n // w)
             return
-    passable = ~avoid & map_info._board_mask
+    avoid = map_info.get_avoid(False)
+    passable = ~avoid & board
 
     # Seed with all other builders' claimed tiles + incremental steps from
     # the nearest friendly bot toward each claim, plus my own position.
@@ -105,15 +82,22 @@ def generate_explore_target():
         visited |= frontier
         c += 1
         recent_frontiers.append(frontier)
-    explore_target = _random_tile(recent_frontiers[0])
-    if explore_target is None:
-        explore_target = Position(random.randint(0, w - 1),
+    frontier = recent_frontiers[0]
+    count = frontier.bit_count()
+    if count == 0:
+        explore_target = Position(random.randint(0, map_info._width - 1),
                                   random.randint(0, map_info._height - 1))
+        return
+    pick = random.randint(0, count - 1)
+    mask = frontier
+    for _ in range(pick):
+        mask &= mask - 1
+    lsb = mask & -mask
+    n = lsb.bit_length() - 1
+    explore_target = Position(n % w, n // w)
 
 
-def run(can_move=True):
-    if not can_move:
-        return                      # movement-only state; nothing to do in place
+def run():
     global explore_target, _explore_target_from_initial
     log("EXPLORE")
     
@@ -132,7 +116,7 @@ def run(can_move=True):
         generate_explore_target()
         _explore_target_from_initial = False
     attempts = 0
-    while attempts < MOVE_ATTEMPTS:
+    while attempts < 1:
         if not nav.move_to(explore_target):
             generate_explore_target()
         else:

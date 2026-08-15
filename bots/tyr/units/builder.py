@@ -7,24 +7,21 @@ import map_info
 import pathing
 from pathing import Pathing
 import comms
-import conveyor_plan as convplan
 from units.spawn_plan import get_ray_endpoint, INITIAL_EXPLORE_MAX_STEPS, INITIAL_SPAWN_COUNT
 
 import units.states.explore  as explore
 import units.states.disrupt  as disrupt
 import units.states.harvest  as harvest
-import units.states.harvest_repair as harvest_repair
 import units.states.route    as route
-import units.states.route_repair   as route_repair
 import units.states.heal     as heal
 import units.states.attack   as attack
-import units.states.secure   as secure
-import units.states.chase    as chase
 import units.states.defend   as defend
 import units.states.cut      as cut
+import units.states.rusher   as rusher
+import units.states.core_feed as core_feed
 import units.defense as defense
 
-from log import DRAW_DEBUG, log
+from log import DRAW_DEBUG
 
 
 rc: Controller
@@ -32,12 +29,12 @@ nav: Pathing = None
 
 # Sorted in descending order of max score to allow early break in selection loop
 states = tuple(sorted(
-    [explore, disrupt, harvest, harvest_repair, route, route_repair, heal, attack, secure, chase],
+    [explore, disrupt, harvest, route, heal, attack, defend, cut, rusher, core_feed],
     key=lambda s: s.MAX_SCORE,
     reverse=True
 ))
 
-# Harvest zones are calculated based on map symmetry with fallback
+# Harvvest zones are calculated based on map symmetry with fallback
 harvest_radius = 0
 _harvest_zone = 0
 _harvest_zone_final = False
@@ -52,47 +49,10 @@ _initial_explore_round = -1
 # explore tiles are restricted to within STAY_NEAR_CORE_DSQ of the core.
 STAY_NEAR_CORE_DSQ = 100
 _stay_near_core = False
+_econ_only = False
 _first_run_done = False
+_repair_assigned = False
 _near_core_mask_cache: tuple[Position | None, int] = (None, 0)
-
-# Conveyor plan the core hands this builder on its spawn turn via slot 0. Decoded
-# once, on this builder's first run, into {Position: facing} where facing is the
-# conveyor's output direction (down-tree toward the core). None until read; stays
-# None for builders the core did not root a plan at. Foundation only -- nothing
-# acts on it yet.
-conveyor_plan: dict | None = None
-_plan_read = False
-
-
-def _core_ward_dir(pos: Position):
-    """The cardinal direction from `pos` to its single core-adjacent neighbour,
-    or None if `pos` touches no core tile. A plan root is always orthogonally
-    adjacent to exactly one core cell, and that side is the one it outputs to."""
-    core = map_info._bm_my_core_area
-    w, h = map_info._width, map_info._height
-    for d in convplan.CARDINALS:
-        dx, dy = d.delta()
-        nx, ny = pos.x + dx, pos.y + dy
-        if 0 <= nx < w and 0 <= ny < h and (core >> (nx + ny * w)) & 1:
-            return d
-    return None
-
-
-def _try_read_conveyor_plan():
-    """First-run only: pull the opening conveyor plan out of slot 0 and decode it
-    from my own tile. The core writes a plan word only on a turn it spawns one
-    plan-builder, so a marker on my first turn means the plan is mine and my tile
-    is its root. Accept it only if I actually sit next to the core (a valid root),
-    deriving the core-ward output side from that neighbour -- a stray reader that
-    isn't core-adjacent is rejected."""
-    global conveyor_plan
-    dfs_bits = comms.read_core_plan()
-    if dfs_bits is None:
-        return
-    excluded = _core_ward_dir(map_info._my_pos)
-    if excluded is None:
-        return
-    conveyor_plan = convplan.decode_dfs(map_info._my_pos, excluded, dfs_bits)
 
 
 def near_core_mask() -> int:
@@ -209,46 +169,65 @@ def _update_initial_explore(current_round: int):
         _initial_explore_target = None
 
 
-def select_best_state(can_move=True, exclude=None):
+def select_best_state():
     best_state = None
     best_score = 0
 
     for state in states:
-        if state is exclude:
-            continue
         # Since states are sorted, break early if we can't beat best score
         if best_score >= state.MAX_SCORE:
             break
 
-        score = state.score(can_move)
+        score = state.score()
         if score > best_score:
             best_score = score
             best_state = state
-    if best_state is not None:
-        log(f"Builder selected state {best_state.__name__} with score {best_score}"
-            f"{'' if can_move else ' (in-place)'}")
+
     return best_state
 
 
 def run():
-    global _stay_near_core, _first_run_done, _plan_read
+    global _stay_near_core, _econ_only, _first_run_done, _repair_assigned
 
     # Sync round info
     current_round = rc.get_current_round()
     if not _first_run_done:
         _first_run_done = True
-    #     if current_round == 1:
-    #         _stay_near_core = True
+        if current_round == 1:
+            # Exactly one builder first runs in round 1. Send that builder on
+            # Tyr's rush instead of applying Champion's near-core leash.
+            rusher.am_rusher = True
+        elif current_round == 2:
+            # Keep the next builder as a permanent near-core economic
+            # caretaker. It owns final route repairs, healing, and the passive
+            # core-feed ring instead of wandering off to attack.
+            _stay_near_core = True
+            _econ_only = True
     map_info.update(recompute=False)
-    comms.read()          # absorb every slot's shared tiles/symmetry, broadcast our own
+    comms.read()          # absorb every slot's shared tiles/symmetry
+    # Slots 2..N+1 are renewable repair leases, where N is the core's measured
+    # repair demand. Slot 1 remains Tyr's initial rusher. When pressure fades,
+    # surplus repairers return to the wider economy; slot 2 is always retained
+    # as the permanent core caretaker and is automatically replaced after death.
+    slot = comms._my_slot
+    target = comms.repair_target()
+    close_during_pressure = (target > 1
+                             and map_info._my_core is not None
+                             and map_info._my_pos.distance_squared(map_info._my_core) <= 36)
+    assigned = (not rusher.am_rusher
+                and ((slot is not None
+                      and comms._FIRST_BUILDER_SLOT + 1 <= slot
+                      <= comms._FIRST_BUILDER_SLOT + target)
+                     or close_during_pressure))
+    if assigned:
+        _stay_near_core = True
+        _econ_only = True
+        _repair_assigned = True
+    elif _repair_assigned:
+        _stay_near_core = False
+        _econ_only = False
+        _repair_assigned = False
     map_info.recompute_derived()
-    draw_mask(map_info._bm_route_targets, 255, 255, 255)
-
-    # First run only: decode the opening conveyor plan the core queued in slot 0
-    # on the turn it spawned us (read here after comms.read() cached the slot).
-    if not _plan_read:
-        _plan_read = True
-        _try_read_conveyor_plan()
     # Hold the defender-spawn reserve only while something is actually at our
     # door. A builder out on the map can't see the core, so it takes the sentry's
     # alarm as the shared signal.
@@ -260,19 +239,21 @@ def run():
     # First few builder bots derive explore target from spawn position
     _update_initial_explore(current_round)
 
-    # Run state-specific logic.
+    # Run state-specific logic
     best_state = select_best_state()
     best_state.run()
 
+
+
+    # A builder holding a block tile must keep its turn free to mirror the enemy
+    # next round; spending it on an opportunistic attack or heal would let the
+    # enemy step around us. defend.run() does its own gated attack instead.
+    if best_state is defend and defend._cached_block is not None:
+        comms.write()
+        return
+
+    # (Khaos looped over cardinal neighbours here firing at enemy builder bots.
+    # That is dead code in Florent: fire() only damages the building on the
+    # target tile, so can_fire on a bot-only tile is always False.)
     heal._do_best_heal()
-
-    # Free-action retry: if we've neither moved nor acted this turn, our single
-    # move-or-action is still unspent. Rather than waste it, pick the best thing
-    # we can do WITHOUT moving (a DIFFERENT state than we already chose) and do
-    # only its in-place action -- so we hold position but still use the action.
-    if has_op():
-        second = select_best_state(can_move=False, exclude=best_state)
-        if second is not None:
-            second.run(False)
-
     comms.write()

@@ -390,6 +390,22 @@ def read_alarm() -> tuple[Position, Position | None] | None:
     return launcher, Position(en % _width, en // _width)
 
 
+def ally_positions() -> list:
+    """Positions of live ally builders from the shared store -- the 'global
+    array' of where our allies are, independent of who can see whom. Reads each
+    builder slot's last-broadcast position, skipping our own slot, free slots,
+    and slots whose word went stale (writer likely dead). Requires a prior
+    read()/_absorb() this round."""
+    out = []
+    for s in range(_FIRST_BUILDER_SLOT, _DEFENSE_SLOT):
+        if s == _my_slot:
+            continue
+        p = _slot_prev_pos[s]
+        if p is not None and _slot_dead[s] == 0:
+            out.append(p)
+    return out
+
+
 def route_total() -> int:
     """Cumulative "route fully connected" count the core exposes in its comms.
     On the core this is its own running tally; elsewhere it's the last value

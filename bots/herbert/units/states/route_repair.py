@@ -136,43 +136,6 @@ def _my_claims():
     return pathing.claim_subset(my_mask, map_info._bm_friendly_bots, candidates & ~avoid, tie_self=True)
 
 _cached_target = None        # (destroy, nxt, seg_dist) picked+validated in score()
-_cached_plan_action = None   # ("conveyor", pos, facing) | ("harvester", ore) | None
-
-
-# --- Opening conveyor plan (handed to us by the core in comms slot 0, decoded
-# into units.builder.conveyor_plan). We build it in the DFS order the core sent
-# it: parent conveyor before child, so each conveyor's output already has the
-# tile it feeds. A harvester is placed right after the conveyor that sits next to
-# its ore, which is the order the plan assumes.
-def _bit(pos) -> int:
-    return 1 << (pos.x + pos.y * map_info._width)
-
-
-def _my_conveyor_at(pos) -> bool:
-    return bool(map_info._bm_et[map_info._IDX_CONVEYOR]
-                & map_info._bm_team[map_info._my_team_idx] & _bit(pos))
-
-
-def _my_harvester_at(pos) -> bool:
-    return bool(map_info._bm_et[map_info._IDX_HARVESTER]
-                & map_info._bm_team[map_info._my_team_idx] & _bit(pos))
-
-
-def _adjacent_ore_needing_harvester(pos):
-    """An orthogonally adjacent, currently empty ore tile with no harvester yet,
-    or None. `pos` is a plan conveyor we've just confirmed is built. (The harvest
-    state masks core-visible ore out of its own targets; the plan places its
-    harvesters unconditionally.)"""
-    w, h = map_info._width, map_info._height
-    ore = map_info._bm_env[map_info._IDX_ENV_ORE_TI]
-    for d in (Direction.NORTH, Direction.EAST, Direction.SOUTH, Direction.WEST):
-        nb = pos.add(d)
-        if 0 <= nb.x < w and 0 <= nb.y < h:
-            n = nb.x + nb.y * w
-            if ((ore >> n) & 1 and not _my_harvester_at(nb)
-                    and map_info._building_et_idx[n] < 0):
-                return nb
-    return None
 
 
 def _core_ward_dir(pos):
@@ -185,23 +148,6 @@ def _core_ward_dir(pos):
         nb = pos.add(d)
         if 0 <= nb.x < w and 0 <= nb.y < h and (core >> (nb.x + nb.y * w)) & 1:
             return d
-    return None
-
-
-def _plan_next_action():
-    """The next unbuilt piece of this builder's opening plan, in build order, or
-    None if the plan is complete (or this builder has none). Conveyors go down in
-    DFS order; the harvester next to a conveyor follows immediately once that
-    conveyor is up."""
-    plan = units.builder.conveyor_plan
-    if not plan:
-        return None
-    for pos, facing in plan.items():
-        if not _my_conveyor_at(pos):
-            return ("conveyor", pos, facing)
-        ore = _adjacent_ore_needing_harvester(pos)
-        if ore is not None:
-            return ("harvester", ore, pos)
     return None
 
 
@@ -248,46 +194,23 @@ def _find_route_target():
 
 
 MAX_SCORE = 8
-def score():
-    global _cached_target, _cached_plan_action
-    _cached_plan_action = _plan_next_action()
-    if _cached_plan_action is not None:
-        _cached_target = None
-        return MAX_SCORE
-    units.builder.draw_mask(map_info._bm_dead_end, 0, 0, 255)
+def score(can_move=True):
+    # Repair ONLY. The opening conveyor plan is built by `route` at its own tier
+    # (5); route_repair used to duplicate that plan handling and, being the higher
+    # tier (8), would win the tie and mislabel an opening-plan build as a "repair"
+    # even when nothing was damaged. Score purely on actual repair targets.
+    global _cached_target
     _cached_target = _find_route_target()
+    if _cached_target is not None and not can_move:
+        # In-place retry: only if the tile to (re)build is already cardinally adjacent.
+        destroy = _cached_target[0]
+        my = map_info._my_pos
+        if abs(destroy.x - my.x) + abs(destroy.y - my.y) != 1:
+            _cached_target = None
     return MAX_SCORE if _cached_target is not None else 0
 
 
-def _run_plan_action(action) -> None:
-    """Move adjacent to the next plan tile and place it (conveyor or harvester)."""
-    if action[0] == "conveyor":
-        _, pos, facing = action
-        cd = _core_ward_dir(pos)
-        if cd is not None:
-            facing = cd                     # next to the core: always output into it
-        need = rc.get_conveyor_cost() + map_info.ti_reserve()
-        if rc.get_global_resources() >= need and rc.can_build_conveyor(pos, facing):
-            rc.build_conveyor(pos, facing)
-            map_info.update_at(pos)
-        else:
-            nav.move_adjacent(pos, allow_bots=True)
-    else:  # harvester, right after the conveyor next to its ore
-        _, ore, conv = action
-        need = rc.get_harvester_cost() + map_info.ti_reserve()
-        if rc.get_global_resources() >= need and rc.can_build_harvester(ore):
-            rc.build_harvester(ore)
-            map_info.update_at(ore)
-        else:
-            nav.move_to(conv)
-
-def run():
-    # Opening plan takes precedence when this builder has one still going up.
-    if _cached_plan_action is not None:
-        log("ROUTE-PLAN")
-        _run_plan_action(_cached_plan_action)
-        return
-
+def run(can_move=True):
     target = _cached_target      # (destroy, nxt, seg_dist), validated in score()
     if target is None:
         return
@@ -296,6 +219,11 @@ def run():
     need = rc.get_conveyor_cost() + map_info.ti_reserve()
 
     destroy, nxt, seg_dist = target
+    # Move into position first. bfs_move keeps us put when we're already adjacent
+    # and safe (so we destroy/build below), but steps us off our tile if it's now
+    # lethal -- flee instead of standing there to build and dying.
+    if nav.move_adjacent(destroy, can_move=can_move):
+        return
     # `need` is only known to be covered on the branch that found a building
     # here, and can_destroy is engine truth about a tile we may remember as empty.
     if rc.can_destroy(destroy) and has_op() and rc.get_global_resources() >= need:
@@ -320,4 +248,3 @@ def run():
     # fully connected this turn. Report it so the core can tally completions.
     if built and seg_dist == 1:
         comms.note_route_complete()
-    nav.move_adjacent(destroy)

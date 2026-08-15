@@ -7,9 +7,7 @@ from fcode import Controller, Direction, Environment, Position
 import map_info
 from log import DRAW_DEBUG
 
-# Number of initial builder bots that follow the core's spawn plan. Also caps the
-# ore-group merge (core.py) to this many groups -- one opening builder per group.
-# (5 was tried and lost hard to Tyr: 14W-16L -> 7W-23L; 4 is the tuned value.)
+# Number of initial builder bots that follow the core's spawn plan.
 INITIAL_SPAWN_COUNT = 4
 
 # Chebyshev-step cap for a builder bot's initial ray-follow exploration.
@@ -124,61 +122,6 @@ def pick_n_directions(pool, n: int):
             best = combo
 
     return [pool[k] for k in best]
-
-
-def pick_n_directions_with_fixed(pool, n: int, fixed_dirs):
-    """Like `pick_n_directions`, but maximise the angular spread of the chosen
-    directions TOGETHER WITH `fixed_dirs` -- bearings already committed to (e.g.
-    the ore groups builders are being sent to). Scores every candidate combo by
-    the same product-of-pairwise-distances metric v6 uses, extended to also
-    include chosen<->fixed pairs, so the fan-out spreads away from both the other
-    fan-out bots and the ore-group bots. Returns up to n (direction, endpoint)
-    pairs from `pool`. With no fixed_dirs it is identical to pick_n_directions."""
-    if n <= 0:
-        return []
-    if len(pool) <= n:
-        return list(pool)
-
-    best = tuple(range(n))
-    best_score = -1
-    best_diagonal_count = -1
-    for combo in combinations(range(len(pool)), n):
-        chosen = [pool[k][0] for k in combo]
-        score = 1
-        for i in range(n):
-            for j in range(i + 1, n):
-                score *= dir_distance(chosen[i], chosen[j])
-        for cd in chosen:
-            for fd in fixed_dirs:
-                score *= dir_distance(cd, fd)
-        diagonal_count = sum(1 for cd in chosen if cd in DIAGONAL)
-        if score > best_score or (score == best_score and diagonal_count > best_diagonal_count):
-            best_score = score
-            best_diagonal_count = diagonal_count
-            best = combo
-
-    return [pool[k] for k in best]
-
-
-def choose_fanout_plan(rc: Controller, core_pos: Position, n: int, fixed_dirs):
-    """Directions for the `n` opening builders left over after the ore groups
-    have been assigned. Uses the same admissible-direction filter and v6 spread
-    algorithm as `choose_spawn_plan`, but keeps the chosen bearings maximally
-    spread from `fixed_dirs` (the ore-group directions) too, for the best overall
-    coverage. Returns a list of Directions (may be shorter than n)."""
-    if n <= 0:
-        return []
-    width = rc.get_map_width()
-    height = rc.get_map_height()
-    valid = get_valid_directions(rc, core_pos, width, height)
-    if not valid:
-        pool = [d for d in DIRECTIONS if d not in fixed_dirs] or list(DIRECTIONS)
-        return random.sample(pool, min(n, len(pool)))
-    chosen = pick_n_directions_with_fixed(valid, n, fixed_dirs)
-    center = Position(width // 2, height // 2)
-    center_dir = map_info.direction_to(core_pos, center)
-    chosen.sort(key=lambda de: (dir_distance(de[0], center_dir), de[1].distance_squared(center)))
-    return [d for (d, _) in chosen]
 
 
 def draw_spawn_plan(rc: Controller, core_pos: Position, spawn_plan, width: int, height: int) -> None:

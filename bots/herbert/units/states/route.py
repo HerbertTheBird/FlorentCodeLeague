@@ -250,8 +250,13 @@ def _find_route_target():
     return None
 
 
+def _adjacent_to_me(pos) -> bool:
+    my = map_info._my_pos
+    return abs(pos.x - my.x) + abs(pos.y - my.y) == 1
+
+
 MAX_SCORE = 5
-def score():
+def score(can_move=True):
     global _cached_target, _cached_plan_action
     # Building our own opening plan runs at route's normal tier -- "forced valid"
     # while unbuilt, but not a max that overrides everything: attack (tier 9) can
@@ -260,14 +265,32 @@ def score():
     # while a plan is still going up.
     _cached_plan_action = _plan_next_action()
     if _cached_plan_action is not None:
-        _cached_target = None
-        return MAX_SCORE
+        # The opening plan assumes we're building in a vacuum. The moment that
+        # stops being true -- our tile falls under enemy turret threat, or we can
+        # see an enemy builder bot -- abandon the plan for good and fall through to
+        # normal state scoring, so combat/economy states respond to what's in front
+        # of us now instead of blindly finishing a pre-combat build order.
+        my_pos = map_info._my_pos
+        my_bit = 1 << (my_pos.x + my_pos.y * map_info._width)
+        if (map_info._bm_enemy_turret_threat & my_bit) or map_info._bm_enemy_bots:
+            units.builder.conveyor_plan = None
+            _cached_plan_action = None
+        else:
+            _cached_target = None
+            # In-place retry: only if the next plan piece is buildable right here
+            # (action[1] is the tile it places -- conveyor pos or harvester ore).
+            if not can_move and not _adjacent_to_me(_cached_plan_action[1]):
+                _cached_plan_action = None
+                return 0
+            return MAX_SCORE
     units.builder.draw_mask(map_info._bm_dead_end, 0, 0, 255)
     _cached_target = _find_route_target()
+    if _cached_target is not None and not can_move and not _adjacent_to_me(_cached_target[0]):
+        _cached_target = None
     return MAX_SCORE if _cached_target is not None else 0
 
 
-def _run_plan_action(action) -> None:
+def _run_plan_action(action, can_move=True) -> None:
     """Move adjacent to the next plan tile and place it (conveyor or harvester)."""
     if action[0] == "conveyor":
         _, pos, facing = action
@@ -279,7 +302,7 @@ def _run_plan_action(action) -> None:
             rc.build_conveyor(pos, facing)
             map_info.update_at(pos)
         else:
-            nav.move_adjacent(pos, allow_bots=True)
+            nav.move_adjacent(pos, allow_bots=True, can_move=can_move)
     else:  # harvester, right after the conveyor next to its ore
         _, ore, conv = action
         need = rc.get_harvester_cost() + map_info.ti_reserve()
@@ -287,13 +310,13 @@ def _run_plan_action(action) -> None:
             rc.build_harvester(ore)
             map_info.update_at(ore)
         else:
-            nav.move_to(conv)
+            nav.move_to(conv, can_move=can_move)
 
-def run():
+def run(can_move=True):
     # Opening plan takes precedence when this builder has one still going up.
     if _cached_plan_action is not None:
         log("ROUTE-PLAN")
-        _run_plan_action(_cached_plan_action)
+        _run_plan_action(_cached_plan_action, can_move)
         return
 
     target = _cached_target      # (destroy, nxt, seg_dist), validated in score()
@@ -304,6 +327,11 @@ def run():
     need = rc.get_conveyor_cost() + map_info.ti_reserve()
 
     destroy, nxt, seg_dist = target
+    # Move into position first. bfs_move keeps us put when we're already adjacent
+    # and safe (so we destroy/build below), but steps us off our tile if it's now
+    # lethal -- flee instead of standing there to build and dying.
+    if nav.move_adjacent(destroy, can_move=can_move):
+        return
     # `need` is only known to be covered on the branch that found a building
     # here, and can_destroy is engine truth about a tile we may remember as empty.
     if rc.can_destroy(destroy) and has_op() and rc.get_global_resources() >= need:
@@ -328,4 +356,3 @@ def run():
     # fully connected this turn. Report it so the core can tally completions.
     if built and seg_dist == 1:
         comms.note_route_complete()
-    nav.move_adjacent(destroy)

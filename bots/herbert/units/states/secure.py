@@ -1,27 +1,20 @@
 """Builder state: secure the core's feed ring.
 
-Whenever a conveyor already points into our core, fill the EMPTY tiles around it
-that could also feed the core with more conveyors. This packs the core's feed
-ring so titanium keeps flowing in even if one feed line is cut.
+Fill the empty tiles around our core with conveyors that feed it, so titanium
+keeps flowing in even if one feed line is cut.
 
-We only bother securing feed lines that are believed to be carrying titanium
-(map_info._bm_ti_carrying) -- an idle core-facer has no flow to protect. The
-candidate ring is every tile at Chebyshev distance 1 of the 2x2 core (the
-12-tile ring around it), EMPTY (no building, no ore, no wall):
+Every empty tile in the Chebyshev-1 ring of the 2x2 core (the 12-tile ring) is a
+valid target ("empty" = seen, with no building, wall, or ore):
   * a CARDINAL ring tile (manhattan-adjacent to a core cell) outputs straight
     into the core;
-  * a DIAGONAL ring tile (corner) can't face a core cell, so it outputs into
-    whichever of its two core-adjacent neighbours already holds a *carrying*
-    core-facing conveyor -- and if both do, the one carrying LESS load (feed the
-    emptier lane).
-
-A spot is a valid target iff it is such an empty ring tile AND either:
-  * it is adjacent to a conveyor of ours that faces into the core AND is
-    believed to be carrying (pack the live feed ring -- this is also exactly
-    what makes a diagonal tile have a neighbour to point into), OR
-  * (cardinal tiles only) it is contested -- an enemy builder is within BFS
-    CONTEST_RANGE of it and a friendly bot can reach it no later than that
-    enemy, so we plant a feed conveyor and take the spot before they do.
+  * a DIAGONAL ring tile (corner) can't face a core cell, so it outputs into one
+    of its two core-adjacent cardinal neighbours -- preferring one that already
+    holds a carrying core-facer (least load if both do), else just any
+    core-adjacent neighbour (it feeds the core too, or will once secured).
+Preference: if any empty ring tile is adjacent to one of our LOADED (carrying)
+conveyors, we restrict to those -- back up the live feed lines first and ignore
+the idle spots entirely. Only when none are loaded-adjacent do all ring tiles
+stay in play.
 
 Ranks just below attack and above everything else: once a builder is beside the
 core with a feed to complete, sealing that feed beats any economy work, but a
@@ -35,9 +28,6 @@ from pathing import Pathing
 from fcode import Controller, Direction, Position
 import units.builder
 from log import log
-
-# An enemy builder within this BFS distance of a core feed tile is "rushing" it.
-CONTEST_RANGE = 5
 
 rc: Controller = None
 nav: Pathing = None
@@ -91,30 +81,35 @@ def _feed_dir(pos):
     """Direction a secure conveyor on `pos` should face.
 
     Cardinal ring tile -> straight into the core. Diagonal (corner) ring tile
-    can't face a core cell, so it points into whichever of its core-adjacent
-    neighbours already holds a core-facing conveyor; if both do, the one with
-    the least load. Returns None if no valid output exists."""
+    can't face a core cell, so it points into one of its two core-adjacent
+    cardinal neighbours -- preferring one that already holds a carrying
+    core-facer (least load if both do), else just any core-adjacent neighbour
+    (it feeds the core too, or will once secured). A ring tile always has such a
+    neighbour, so this never returns None for a ring candidate."""
     d = _core_ward_dir(pos)
     if d is not None:
         return d
+    core = map_info._bm_my_core_area
+    cardinal_feed = map_info.manhattan(core) & ~core   # core-adjacent feed tiles
     facers = _carrying_core_facers()
-    if not facers:
-        return None
     w, h = map_info._width, map_info._height
     best_dir = None
     best_load = None
+    fallback_dir = None
     for dr in (Direction.NORTH, Direction.EAST, Direction.SOUTH, Direction.WEST):
         nb = pos.add(dr)
         if not (0 <= nb.x < w and 0 <= nb.y < h):
             continue
         n = nb.x + nb.y * w
-        if not ((facers >> n) & 1):
-            continue
-        load = map_info.conv_load[n] if n < len(map_info.conv_load) else 0.0
-        if best_load is None or load < best_load:
-            best_load = load
-            best_dir = dr
-    return best_dir
+        if not ((cardinal_feed >> n) & 1):
+            continue                                   # not a core-adjacent tile
+        fallback_dir = dr
+        if (facers >> n) & 1:
+            load = map_info.conv_load[n] if n < len(map_info.conv_load) else 0.0
+            if best_load is None or load < best_load:
+                best_load = load
+                best_dir = dr
+    return best_dir if best_dir is not None else fallback_dir
 
 
 def _my_claims() -> int:
@@ -124,51 +119,26 @@ def _my_claims() -> int:
     w = map_info._width
     my_pos = map_info._my_pos
     # The full Chebyshev-1 ring around the core (cardinal feed tiles + diagonal
-    # corners). Cardinal tiles can face the core directly; corners feed a
-    # core-facing neighbour instead (see _feed_dir).
+    # corners). EVERY empty ring tile is a valid target, unconditionally --
+    # cardinal tiles output straight into the core, corners into a core-adjacent
+    # neighbour (see _feed_dir). No packing / carrying / contested gate.
     ring = map_info.expand_chebyshev(core) & ~core
-    cardinal = map_info.manhattan(core) & ~core
     # EMPTY: seen, and no building / wall / ore.
     valid = (map_info._bm_seen
              & ~map_info._bm_any_building
              & ~map_info._bm_env[map_info._IDX_ENV_WALL]
              & ~map_info._bm_env[map_info._IDX_ENV_ORE_TI])
-    empty_feed = valid & ring
-    if not empty_feed:
+    candidates = valid & ring
+    if not candidates:
         return 0
 
-    # (A) Adjacent to a conveyor that already feeds the core -> pack the ring.
-    # For a cardinal tile this is the classic "beside a core-facer"; for a
-    # diagonal corner it is exactly the condition that gives _feed_dir a
-    # core-adjacent neighbour to point into.
-    facers = _carrying_core_facers()
-    candidates = (empty_feed & map_info.manhattan(facers)) if facers else 0
-
-    # (B) Contested: an enemy builder is rushing this feed tile (BFS <= 5) and a
-    # friendly bot (nearest, INCLUDING me) can reach it no later than the enemy,
-    # so we can plant a feed conveyor and deny the spot before they take it.
-    # Restricted to cardinal tiles -- only they can feed the core directly, which
-    # is the point of racing for the spot.
-    # Nearest-friendly (not strictly my own distance) keeps the candidate mask
-    # shared across builders so the Voronoi claim stays consistent -- whoever the
-    # claim hands the tile to is the friendly bot that can win the race.
-    # Cheap Manhattan pre-filter (a superset of BFS<=5), then confirm with BFS.
-    enemy_bots = map_info._bm_enemy_bots
-    if enemy_bots:
-        rush = (empty_feed & cardinal & ~candidates
-                & map_info.expand_manhattan(enemy_bots, CONTEST_RANGE))
-        if rush:
-            all_friendly = (1 << (my_pos.x + my_pos.y * w)) | map_info._bm_friendly_bots
-            while rush:
-                b = rush & -rush
-                rush ^= b
-                n = b.bit_length() - 1
-                tpos = Position(n % w, n // w)
-                _, edist = nav.closest(enemy_bots, pos=tpos)
-                if 0 <= edist <= CONTEST_RANGE:
-                    _, fdist = nav.closest(all_friendly, pos=tpos)
-                    if 0 <= fdist <= edist:      # we get there first (or tie)
-                        candidates |= b
+    # Prefer securing beside a LOADED (carrying) conveyor of ours: if any ring
+    # tile is adjacent to one, restrict to those and ignore the idle spots
+    # entirely -- back up the live feed lines first.
+    loaded = map_info._bm_ti_carrying & map_info._bm_team[map_info._my_team_idx]
+    loaded_adj = candidates & map_info.manhattan(loaded)
+    if loaded_adj:
+        candidates = loaded_adj
 
     if units.builder._stay_near_core:
         candidates &= units.builder.near_core_mask()
@@ -179,14 +149,21 @@ def _my_claims() -> int:
 
 
 # Just below attack (9), above every other state (route_repair is 8).
-MAX_SCORE = 8.5
+MAX_SCORE = 3.75
 _cached_target = None       # (candidate Position, core-ward direction) or None
 
 
-def score():
+def score(can_move=True):
     global _cached_target
     _cached_target = None
+    # Can't afford a feed conveyor (+ the defender reserve) -> don't select the
+    # state; run() couldn't build anyway, so it would only hog the builder.
+    if rc.get_global_resources() < rc.get_conveyor_cost() + map_info.ti_reserve():
+        return 0
     claims = _my_claims()
+    if not can_move:
+        # In-place retry: only a feed tile we can build on from right here counts.
+        claims &= map_info.manhattan(1 << (map_info._my_pos.x + map_info._my_pos.y * map_info._width))
     if not claims:
         return 0
     candidate, _ = nav.closest(claims)      # nearest reachable feed tile
@@ -199,18 +176,18 @@ def score():
     return MAX_SCORE
 
 
-def run():
+def run(can_move=True):
     if _cached_target is None:
         return
     log("SECURE")
     candidate, d = _cached_target
-    my_pos = map_info._my_pos
-    adjacent = abs(candidate.x - my_pos.x) + abs(candidate.y - my_pos.y) == 1
-    if adjacent:
-        if (rc.can_build_conveyor(candidate, d)
-                and rc.get_global_resources() >= rc.get_conveyor_cost() + map_info.ti_reserve()):
-            log(f"SECURE: feed conveyor at {candidate} facing {d}")
-            rc.build_conveyor(candidate, d)
-            map_info.update_at(candidate)
+    # Always try to move into position first. bfs_move keeps us put when we're
+    # already adjacent and safe, but steps us off our tile if it's now lethal --
+    # only build when we didn't need to move.
+    if nav.move_adjacent(candidate, can_move=can_move):
         return
-    nav.move_adjacent(candidate)
+    if (rc.can_build_conveyor(candidate, d)
+            and rc.get_global_resources() >= rc.get_conveyor_cost() + map_info.ti_reserve()):
+        log(f"SECURE: feed conveyor at {candidate} facing {d}")
+        rc.build_conveyor(candidate, d)
+        map_info.update_at(candidate)

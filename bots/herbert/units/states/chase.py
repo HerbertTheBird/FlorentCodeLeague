@@ -33,6 +33,22 @@ def _my_claims() -> int:
     enemies = map_info._bm_enemy_bots & zone
     if not enemies:
         return 0
+    # Drop any raider that already has a (different) friendly bot within BFS 2 --
+    # that friendly is on it, so we shouldn't pile a second chaser on. Using
+    # _bm_friendly_bots (which excludes self) means an enemy is only removed for
+    # OTHER builders; the friendly actually next to it still keeps chasing.
+    friendly = map_info._bm_friendly_bots
+    if friendly:
+        passable = map_info.passable()
+        reach = friendly
+        near = 0
+        for _ in range(2):                    # BFS layers 1 and 2
+            nxt = map_info.expand_manhattan(reach)
+            near |= nxt & enemies
+            reach = nxt & passable & ~reach
+        enemies &= ~near
+        if not enemies:
+            return 0
     w = map_info._width
     my_pos = map_info._my_pos
     my_mask = 1 << (my_pos.x + my_pos.y * w)
@@ -43,9 +59,11 @@ MAX_SCORE = 4.5
 _cached_target = None
 
 
-def score():
+def score(can_move=True):
     global _cached_target
     _cached_target = None
+    if not can_move:
+        return 0                            # chasing is pure movement
     claims = _my_claims()
     if claims:
         target, _ = nav.closest(claims)     # nearest reachable raider
@@ -54,8 +72,8 @@ def score():
     return MAX_SCORE if _cached_target is not None else 0
 
 
-def run():
-    if _cached_target is None:
+def run(can_move=True):
+    if not can_move or _cached_target is None:
         return
     log("CHASE", _cached_target)
     nav.move_to(_cached_target)

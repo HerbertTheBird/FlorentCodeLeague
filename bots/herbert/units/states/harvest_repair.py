@@ -158,13 +158,22 @@ def _find_harvest_target():
 
 MAX_SCORE = 7
 _cached_target = None
-def score():
+def score(can_move=True):
     global _cached_target
     _cached_target = _find_harvest_target()
-    return MAX_SCORE if _cached_target is not None else 0
+    if _cached_target is None:
+        return 0
+    if not can_move:
+        # In-place retry: only worth it if the ore is already cardinally adjacent.
+        best_ore = _cached_target[0]
+        my = map_info._my_pos
+        if abs(best_ore.x - my.x) + abs(best_ore.y - my.y) != 1:
+            _cached_target = None
+            return 0
+    return MAX_SCORE
 
 
-def run():
+def run(can_move=True):
     target = _cached_target
     if target is None:
         return
@@ -172,6 +181,12 @@ def run():
     best_ore, path, ore_bit = target
     w = map_info._width
     my_team_idx = map_info._my_team_idx
+
+    # Move into position first. bfs_move keeps us put when we're already adjacent
+    # and safe (so the destroy/build below runs), but if our tile is now lethal it
+    # steps us off it -- we flee instead of standing there to harvest and dying.
+    if nav.move_adjacent(best_ore, can_move=can_move):
+        return
 
     # A team bit is only set alongside a building, so this implies one stands here.
     if map_info._bm_team[my_team_idx] & ore_bit and rc.can_destroy(best_ore) and has_op():
@@ -190,7 +205,7 @@ def run():
             map_info.update_at(best_ore)
             return
         log("harvest: wrong side of", best_ore, "- crossing to", p0)
-        nav.move_to(p0)
+        nav.move_to(p0, can_move=can_move)
         return
 
-    nav.move_adjacent(best_ore)
+    nav.move_adjacent(best_ore, can_move=can_move)
