@@ -33,6 +33,18 @@ they are not legal yet:
     (LAUNCH, (from_x, from_y), (to_x, to_y))
                                   launcher: throw whatever friendly builder is
                                   standing on from_* to to_*
+    (LAUNCH, (from_x, from_y), rule)
+                                  the same, to a tile the table cannot name.
+                                  Three rules, all resolved by the launcher at
+                                  the moment of the throw and all documented at
+                                  `_throw_target` in units/opener.py:
+                                    NEAR_CORE       the tile in range nearest
+                                                    the enemy core
+                                    SAME            whatever this launcher's
+                                                    last rule chose
+                                    (FLANK, (x, y)) that tile if it is free,
+                                                    else the tile nearest the
+                                                    core on the same side of it
     (BUILD,  kind, (x, y))        builder: build `kind` on this orthogonally
     (BUILD,  kind, (x, y), facing)  adjacent tile. Conveyors, splitters, gunners
                                   and sentinels need the facing, as a compass
@@ -44,31 +56,50 @@ they are not legal yet:
                                   it must not wander off the launcher's pickup
                                   tile, and it must not start its walk until it
                                   has actually landed.
+    (WAIT,   RELAY)               builder: do nothing until no friendly launcher
+                                  is within pickup reach (d^2 <= 2) any more.
+                                  The form for a relay, where the landing tile
+                                  of one hop is the pickup tile of the next and
+                                  the number of hops left is not something the
+                                  waiting builder can count. A named tile cannot
+                                  do this job: two throws can land in the SAME
+                                  round -- glacierkeep's do, because the two
+                                  launchers involved act in id order and the
+                                  earlier one clears the pickup tile the later
+                                  one throws from -- and a builder that never
+                                  ran on the tile in between would wait for it
+                                  forever.
     (STRIKE, (x, y), kind)        builder: take this orthogonally adjacent tile.
                                   Break whatever enemy building is on it, then
                                   build `kind` there -- the point is to own the
                                   tile, and whether that needs a fight is not
                                   knowable when the script is written.
-                                  Two refinements, both about not wasting
-                                  titanium. While an enemy builder stands next to
-                                  the target it can heal 4 HP for 1 Ti against
-                                  our 2 damage for 2 Ti, so hitting it alone is
-                                  worse than not hitting it: hold, and let the
-                                  scripted sentinel's 18 arrive to make up a
-                                  one-shot. With nobody there to heal it, chip
-                                  away alone and it dies on its own schedule.
-                                  And once the tile is OURS, the program ends
-                                  there -- the builder holds and guards what it
-                                  just built rather than running whatever came
-                                  after.
+                                  While an enemy builder stands next to the
+                                  target it heals 4 HP for 1 Ti against our 2
+                                  damage for 2 Ti, so hitting it alone is worse
+                                  than not hitting it: hold, and let a scripted
+                                  sentinel's 18 arrive to make up a one-shot.
+                                  With nobody there to heal it, chip away alone.
+                                  A map may set `strike_stands_off` to refuse the
+                                  fight outright and simply skip an occupied
+                                  tile. That is right where every STRIKE target
+                                  is beside the enemy CORE and therefore always
+                                  defended -- the exchange is four to one against
+                                  us and a hole in the ring costs less than the
+                                  bank closing it would take. It is wrong on a
+                                  lone doorway nobody is standing next to.
     (SKIP_UNLESS_ENEMY, (x, y), n)
+    (SKIP_UNLESS_ENEMY, ((x, y), (x, y), ...), n)
                                   builder: unless an enemy building stands on
-                                  (x, y), skip the next n ops. Guards work that
+                                  (x, y) -- or on any one of them, in the second
+                                  form -- skip the next n ops. Guards work that
                                   is only worth doing if the enemy is actually
                                   there -- a sentinel shares its cost scale with
                                   builder bots and can be 85 Ti by the time one
                                   is wanted, which is not a price worth paying to
-                                  shoot at an empty tile.
+                                  shoot at an empty tile. Only tiles this builder
+                                  can SEE answer honestly, so keep them inside
+                                  the r^2=20 it will have when it reads them.
     (ASSAULT, (stand_x, stand_y), (target_x, target_y))
                                   builder: go to the standing tile and hit the
                                   target from it for the rest of the game. Never
@@ -175,6 +206,12 @@ STRIKE = "strike"
 ASSAULT = "assault"
 SKIP_UNLESS_ENEMY = "skip_unless_enemy"
 
+# --- the arguments that are rules rather than tiles -------------------------
+RELAY = "relay"           # WAIT: until the launchers are finished with us
+NEAR_CORE = "near_core"   # LAUNCH: the tile in range nearest the enemy core
+SAME = "same"             # LAUNCH: wherever this launcher's last rule landed
+FLANK = "flank"           # LAUNCH: (FLANK, tile) -- that tile, or its side
+
 # There is deliberately no stall timeout. An op that is not legal yet is retried
 # for as long as it takes, because the reason is almost always "not yet" rather
 # than "never": the tile is occupied this turn, the action cooldown has not come
@@ -199,6 +236,20 @@ SKIP_UNLESS_ENEMY = "skip_unless_enemy"
 # the core reuses within a dozen turns, and without the bound that builder claims
 # role 3, waits for a throw that will never come, and idles until it times out.
 CLAIM_SLACK = 4
+
+# Hiring ceiling on a scripted map, and the bank that lifts it.
+#
+# The core's own crew gate counts builders within r^2=36 of itself, so a crew
+# that has dispersed reads as a small crew and it keeps hiring -- which is how
+# drakkarfjord ran to the 50-unit cap with thousands banked while royale, whose
+# crew stays home behind its seal, never did. These count every unit alive.
+#
+# Under BUILDER_CAP_RELEASE the crew holds at BUILDER_SOFT_CAP and the titanium
+# goes to the bank, which is what every one of these plans is actually waiting
+# on. Over it, the brakes come off entirely -- the soft cap lifts and the
+# per-map `builder_buffer` stops applying.
+BUILDER_SOFT_CAP = 20
+BUILDER_CAP_RELEASE = 1200
 
 
 def claim_deadline(spec, role):
@@ -254,6 +305,31 @@ OPENERS = {
         # is gone for the rest of the game, so the ordinary spawn chooser is not
         # allowed to use them -- E's own scripted spawn still can.
         "no_spawn": [(4, 14), (4, 15)],
+        # Once the bank passes 1000 the economy has done its job, and a third of
+        # the workforce goes over the top of each seal instead of banking more.
+        # A volunteer walks to the pickup tile, builds the launcher beside it if
+        # nobody has yet, then stands there and is thrown clean across.
+        #
+        #   id%3==0 -> (10,28), launcher (11,28), over to (16,28)
+        #   id%3==1 -> (10,1),  launcher (11,1),  over to (16,1)
+        #   id%3==2 -> stays home
+        #
+        # Straight across, same row, landing three tiles beyond the barrier at
+        # x=13 and well clear of the wall stubs at (14,26) and (14,3). Both
+        # throws are d^2=25 against the cap of 26, so they are as far over as the
+        # launcher can manage.
+        #
+        # The pickup tiles are one west of each launcher and -- checked against
+        # every cardinal neighbour of every seal barrier -- are not tiles the
+        # scripted guards ever stand on. That is what keeps D and C from being
+        # picked up off the barriers they are there to hold; a launcher throws
+        # whatever is on its pickup square and cannot ask who it is.
+        "ferry_after": {"titanium": 1000},
+        "ferry": {
+            (11, 28): ((10, 28), (16, 28), (3, 0)),
+            (11, 1): ((10, 1), (16, 1), (3, 1)),
+        },
+        "ferry_build": [(11, 28), (11, 1)],
         "core_script": [
             (SPAWN, (3, 13)),     # A
             (SPAWN, (3, 16)),     # B
@@ -497,6 +573,11 @@ OPENERS = {
         "sym": "v",
         "keep_launchers": True,
         "ferry_after": "ore_worked",
+        # Half the crew crosses, half holds the seal. Split on the comms slot
+        # rather than the entity id -- see `opener.split_matches`. On the id this
+        # read 3 of 12 builders from one seat and 9 of 15 from the other, and the
+        # seat that got 3 lost every game.
+        "ferry_who": (2, 1),
         # Our half's ore: two 2x2 clusters, in the corners either side of the
         # core. The seal at row 11 makes this exactly the ore we can ever reach,
         # so "the economy is finished" means these eight tiles are worked.
@@ -550,6 +631,278 @@ OPENERS = {
                 (BUILD, "barrier", (14, 9)),
                 (GOTO, (15, 10)),
                 (BUILD, "barrier", (15, 9)),
+            ],
+        ],
+    },
+
+    # ------------------------------------------------------------------------
+    # drakkarfjord 30x30, 180-degree symmetry. One launcher by the core throws
+    # six builders out along the diagonal, and each plugs one hole in the broken
+    # wall line that runs corner to corner between the two bases.
+    #
+    # Six of the eight barriers are single-tile gaps with wall directly above and
+    # below -- (9,7) (6,2) (13,11) (13,18) (17,23) (20,27) -- so one barrier each
+    # closes them outright.
+    #
+    # The other two are a pair and only work together. (13,14) has wall above but
+    # open floor below; (14,15) has open floor on all four sides. Placed together
+    # they make a diagonal chain
+    #
+    #        wall (13,13) -> (13,14) -> (14,15) -> wall (15,16)
+    #
+    # and diagonal contact is enough, because a builder can only step cardinally:
+    # crossing between (13,15) and (14,14) needs a diagonal move that does not
+    # exist. A and D place one each, so neither seals anything until both have.
+    #
+    # A and B are both thrown to (7,18), one after the other -- A has walked on
+    # by the time B lands. That stays unambiguous because A's program opens with
+    # a build, so A can only ever be claimed beside the core.
+    # ------------------------------------------------------------------------
+    "drakkarfjord": {
+        "size": (30, 30),
+        "core": (2, 24),
+        "sym": "r",
+        # Past 1000 titanium every odd-id builder stops banking and goes over the
+        # wall. The destination is not a fixed tile here: unlike valkyrie's two
+        # strips there is no single doorway to aim at, so the launcher picks the
+        # tile nearest the enemy core out of everything it can reach that lies on
+        # their side of the map. From (12,15) that is sixteen tiles to choose
+        # from, all of them across the seal, the nearest one 170 away from their
+        # core against the launcher's own 25.
+        # Two mines we deliberately leave alone. Working them drags builders out
+        # to the far corners for ore we do not need, and the bank is what this
+        # plan actually spends.
+        "avoid_ore": [(18, 26), (2, 2)],
+        # And hire more slowly than the default 150, for the same reason: at the
+        # normal rate the bank never reached the 1000 the crossing waits on,
+        # because every spare 150 went straight back into another builder.
+        "builder_buffer": 250,
+        "ferry_after": {"titanium": 1000},
+        "ferry": {
+            # Every odd id, plus half the even ones: id%4 in {0,1,3}. The
+            # remaining quarter stays home on the seal and the harvesters.
+            (12, 15): ((11, 15), "enemy_side", (4, (0, 1, 3))),
+        },
+        "ferry_build": [(12, 15)],
+        "core_script": [
+            (SPAWN, (4, 23)),     # A
+            (SPAWN, (4, 23)),     # B
+            (SPAWN, (4, 23)),     # C
+            (SPAWN, (4, 23)),     # D
+            (SPAWN, (4, 23)),     # E
+            (SPAWN, (4, 23)),     # F
+        ],
+        "launchers": {
+            (4, 22): [            # built by A, then throws the other five out
+                (LAUNCH, (4, 23), (7, 18)),   # A
+                (LAUNCH, (4, 23), (8, 19)),   # D, second out
+                (LAUNCH, (4, 23), (7, 18)),   # B, once A has moved on
+                (LAUNCH, (4, 23), (5, 17)),   # C
+                (LAUNCH, (4, 23), (9, 23)),   # E
+                (LAUNCH, (4, 23), (7, 26)),   # F
+            ],
+        },
+        "builders": [
+            [   # role 0 -- A: the lower hole first, then up the column
+                (BUILD, "launcher", (4, 22)),
+                (WAIT, (7, 18)),
+                (GOTO, (12, 14)),
+                (BUILD, "barrier", (13, 14)),
+                (GOTO, (12, 12)),
+                (BUILD, "barrier", (12, 11)),
+            ],
+            [   # role 1 -- D. (13,18) turned out to be redundant: the line closes
+                # without it, so it is one barrier and one turn saved.
+                (WAIT, (8, 19)),
+                (GOTO, (14, 18)),
+                (BUILD, "barrier", (15, 18)),
+                (GOTO, (14, 16)),
+                (BUILD, "barrier", (14, 15)),
+            ],
+            [   # role 2 -- B: the far northern hole
+                (WAIT, (7, 18)),
+                (GOTO, (7, 7)),
+                (BUILD, "barrier", (8, 7)),
+            ],
+            [   # role 3 -- C: the corner hole
+                (WAIT, (5, 17)),
+                (GOTO, (4, 2)),
+                (BUILD, "barrier", (5, 2)),
+            ],
+            [   # role 4 -- E
+                (WAIT, (9, 23)),
+                (GOTO, (16, 23)),
+                (BUILD, "barrier", (17, 23)),
+            ],
+            [   # role 5 -- F
+                (WAIT, (7, 26)),
+                (GOTO, (19, 27)),
+                (BUILD, "barrier", (20, 27)),
+            ],
+        ],
+    },
+
+    # ------------------------------------------------------------------------
+    # glacierkeep 30x30, mirror symmetry in y -- authored from the SOUTH core,
+    # (14,26), and mirrored for the north.
+    #
+    # Not a seal. The two halves are joined by everything outside the central
+    # pillars, so there is nothing to shut; what there IS, is a clear column at
+    # x=14 running the whole height of the map between the two pillar gaps at
+    # (14,11)/(15,11) and (14,18)/(15,18). So this one goes up it.
+    #
+    # A RELAY: A is thrown, builds a launcher beside where it lands, is thrown
+    # again from that one, and so on until it is standing next to their core.
+    #
+    #        (14,25) -> (15,19) -> (14,13) -> (14,7) -> (13,4)
+    #             26        26        25         5
+    #
+    # The first two hops are exactly d^2=26, the launcher's limit, and the tiles
+    # they land on are forced by it: from (15,19) the ONLY orthogonal neighbour
+    # that can still reach (14,13) is (15,18) -- (14,19) is 36, (16,19) is 40,
+    # (15,20) is 50. B follows one hop behind through the same four launchers and
+    # finishes on the far side of their core.
+    #
+    # The last two throws are rules, not tiles. (14,7) is where NEAR_CORE lands
+    # on an empty board -- it is the unique nearest tile to their core inside 26
+    # of (14,12) -- but it is resolved live so that a builder or a building in
+    # the way costs a tile rather than the plan, and SAME then sends B to
+    # whichever tile A actually got. (13,4) and (16,4) are the two corners of
+    # their core's ring, which is exactly where a conveyor is likely to be, so
+    # those are FLANK: the named tile if it is free, else the nearest tile to
+    # their core still on that side of it -- measured, (13,2) and (16,2).
+    #
+    # Of the four candidate tiles for the last launcher, (14,6) is the one that
+    # keeps both flanks in range and even: it reaches 10 tiles west of their core
+    # and 8 east, against (13,7)'s 8/3 and (14,8)'s 4/2.
+    #
+    # Then A and B take all twelve tiles of their core's spawn ring between them
+    # -- ten barriers plus the two corners they landed on -- which is a box, not
+    # a wall: at CORE_SPAWNING_RADIUS_SQ=2 those twelve tiles are every tile the
+    # enemy core may spawn a builder onto, so a complete ring is a core that
+    # cannot replace anything it loses.
+    #
+    #        A: (14,4) (13,3) (13,4) (13,2) (13,1) (14,1), from x=12 and row 0
+    #        B: (15,4) (16,3) (16,4) (16,2) (16,1) (15,1), from x=17 and row 0
+    #
+    # Each works the column from OUTSIDE it, because a builder that barriers the
+    # tile it is standing next to has to be on the far side of the line it is
+    # drawing or it walls itself in. Both land on a corner, take the two tiles
+    # they can reach from it, step out, and barrier the corner behind them.
+    #
+    # STRIKE rather than BUILD throughout: by turn 10 the ring may well be
+    # holding enemy conveyors, and "own this tile" is the instruction -- whether
+    # that needs a fight first is not knowable from here.
+    #
+    # MEASURED against Champion_v54: A lands beside their core on t8 and B on t9,
+    # the ring closes on t45, and their core mines ZERO titanium for the rest of
+    # the game -- final 15780 to 0, 327 buildings to 4, core destroyed on t782.
+    # The FLANK rule earns its keep on the way: (16,4) was occupied when the
+    # throw came, and B went to (16,3) instead without the script noticing.
+    # ------------------------------------------------------------------------
+    "glacierkeep": {
+        "size": (30, 30),
+        "core": (14, 26),
+        "sym": "v",
+        # Never trade hits for a ring tile here. Unlike a lone doorway, every one
+        # of these is next to the enemy core, so a defender is always beside it.
+        "strike_stands_off": True,
+        "core_script": [
+            (SPAWN, (14, 25)),    # A
+            (SPAWN, (14, 25)),    # B, once A has been thrown clear
+            (SPAWN, (16, 27)),    # C, the economy
+        ],
+        # And nothing else until C has finished. Hiring a crew before there is a
+        # harvester to pay for it is what buried this map: the rush leaves and
+        # the core spends the bank on builders that have no route to work on.
+        "spawn_gate": (26, 27),
+        "launchers": {
+            (14, 24): [           # built by A, beside our own core
+                (LAUNCH, (14, 25), (15, 19)),     # A
+                (LAUNCH, (14, 25), (15, 19)),     # B, once A has moved on
+            ],
+            (15, 18): [           # built by A where it landed, in the gap
+                (LAUNCH, (15, 19), (14, 13)),     # A
+                (LAUNCH, (15, 19), (14, 13)),     # B
+            ],
+            (14, 12): [           # built by A in the far gap
+                (LAUNCH, (14, 13), NEAR_CORE),    # A, as far up as 26 reaches
+                (LAUNCH, (14, 13), SAME),         # B, to the tile A got
+            ],
+            (14, 6): [            # built by A three tiles short of their core
+                (LAUNCH, (14, 7), (FLANK, (13, 4))),   # A, the west corner
+                (LAUNCH, (14, 7), (FLANK, (16, 4))),   # B, the east one
+            ],
+        },
+        "builders": [
+            [   # role 0 -- A: builds the whole relay, then the west half of the
+                # ring. Every WAIT is RELAY rather than a tile: A is thrown four
+                # times and two of the four destinations are rules.
+                (BUILD, "launcher", (14, 24)),
+                (WAIT, RELAY),
+                (BUILD, "launcher", (15, 18)),
+                (WAIT, RELAY),
+                (BUILD, "launcher", (14, 12)),
+                (WAIT, RELAY),
+                (BUILD, "launcher", (14, 6)),
+                (GOTO, (14, 7)),      # back on the pickup tile, if the build moved us
+                (WAIT, RELAY),
+                (GOTO, (13, 4)),
+                (STRIKE, (14, 4), "barrier"),
+                (STRIKE, (13, 3), "barrier"),
+                (GOTO, (12, 4)),
+                (STRIKE, (13, 4), "barrier"),   # the corner it landed on
+                (GOTO, (12, 2)),
+                (STRIKE, (13, 2), "barrier"),
+                (GOTO, (12, 1)),
+                (STRIKE, (13, 1), "barrier"),
+                (GOTO, (14, 0)),
+                (STRIKE, (14, 1), "barrier"),
+            ],
+            [   # role 1 -- B: A's east half, mirrored about x=14.5. Rides the
+                # relay from end to end without building anything, so one RELAY
+                # covers all three throws.
+                (WAIT, (15, 19)),     # the claim tile: B may be spawned and
+                (WAIT, RELAY),        # thrown in one round and first run here
+                (STRIKE, (15, 4), "barrier"),
+                (STRIKE, (16, 3), "barrier"),
+                (GOTO, (17, 4)),
+                (STRIKE, (16, 4), "barrier"),
+                (GOTO, (17, 2)),
+                (STRIKE, (16, 2), "barrier"),
+                (GOTO, (17, 1)),
+                (STRIKE, (16, 1), "barrier"),
+                (GOTO, (15, 0)),
+                (STRIKE, (15, 1), "barrier"),
+            ],
+            [   # role 2 -- the economy, and for a while the whole of it.
+                # Walks east along row 27 laying the line behind itself, one
+                # conveyor per tile vacated, all facing west into the core at
+                # (15,27). The harvester goes down LAST, on (26,27): built
+                # first it would spend the whole walk producing stacks with
+                # nowhere to put them.
+                (GOTO, (17, 27)),
+                (BUILD, "conveyor", (16, 27), "west"),
+                (GOTO, (18, 27)),
+                (BUILD, "conveyor", (17, 27), "west"),
+                (GOTO, (19, 27)),
+                (BUILD, "conveyor", (18, 27), "west"),
+                (GOTO, (20, 27)),
+                (BUILD, "conveyor", (19, 27), "west"),
+                (GOTO, (21, 27)),
+                (BUILD, "conveyor", (20, 27), "west"),
+                (GOTO, (22, 27)),
+                (BUILD, "conveyor", (21, 27), "west"),
+                (GOTO, (23, 27)),
+                (BUILD, "conveyor", (22, 27), "west"),
+                (GOTO, (24, 27)),
+                (BUILD, "conveyor", (23, 27), "west"),
+                (GOTO, (25, 27)),
+                (BUILD, "conveyor", (24, 27), "west"),
+                (GOTO, (26, 27)),
+                (BUILD, "conveyor", (25, 27), "west"),
+                (GOTO, (27, 27)),
+                (BUILD, "harvester", (26, 27)),
             ],
         ],
     },

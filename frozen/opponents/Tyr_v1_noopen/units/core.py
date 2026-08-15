@@ -427,8 +427,7 @@ def run():
             # and can_build_launcher refusing forever.
             headroom = (rc.get_unit_count() + opener.needs_unit_slots()
                         < GameConstants.MAX_TEAM_UNITS)
-            hire_ok = (opener.spawn_gate_open()
-                       and opener.may_hire(rc.get_unit_count(), titanium))
+            hire_ok = opener.may_hire(rc.get_unit_count(), titanium)
             if (crew_ok and headroom and hire_ok
                     and titanium >= rc.get_builder_bot_cost() + buffer):
 

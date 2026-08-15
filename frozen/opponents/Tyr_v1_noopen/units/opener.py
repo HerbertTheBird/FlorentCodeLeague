@@ -519,29 +519,6 @@ def builder_buffer() -> int:
     return spec.get("builder_buffer", 0)
 
 
-def spawn_gate_open() -> bool:
-    """May the core make ORDINARY spawns yet?
-
-    A map can name a tile that has to be built before the economy is allowed to
-    hire at all -- glacierkeep names the far harvester its opening walks out to
-    lay. Until that tile is ours the core spawns only what its own script asks
-    for, so the bank goes into the route rather than into a crew with nothing to
-    work on.
-
-    An unobserved tile reads as not-built, which holds hiring rather than
-    releasing it. That is the safe direction: the unit that most wants to hire is
-    the core, and the core can see its own doorstep.
-    """
-    if spec is None:
-        return True
-    tile = spec.get("spawn_gate")
-    if tile is None:
-        return True
-    p = pos(tile)
-    return map_info.type_at(p.x, p.y) is not None \
-        and bool(map_info._bm_team[map_info._my_team_idx] >> (p.x + p.y * map_info._width) & 1)
-
-
 def may_hire(units_alive: int, titanium: int) -> bool:
     """May the core take on another economic builder?
 
@@ -808,19 +785,6 @@ def sentinel_fire() -> bool:
         log(f"OPENER sentinel {map_info._my_pos} fires {target}")
         return True
     return False
-
-
-def strike_stands_off() -> bool:
-    """Does a STRIKE on this map give up a tile rather than fight for it?
-
-    Off by default -- valkyrie's doorway is worth taking and the enemy is not
-    usually beside it. On at glacierkeep, where every STRIKE is a tile of the
-    ring around the enemy CORE: there is always a defender next to those, so the
-    2-Ti-for-2-HP exchange runs four to one against us against 4-HP-for-1-Ti
-    healing, the conveyor never dies, and the bank the rest of the plan needs
-    goes with it.
-    """
-    return bool(spec is not None and spec.get("strike_stands_off"))
 
 
 def build_kind(what: str):

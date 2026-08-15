@@ -123,6 +123,7 @@ class Sim:
                 self.buildings[t] = "core"
         self.bots: dict[int, tuple[int, int]] = {}      # role -> pos
         self.launchers: dict[tuple[int, int], list] = {}
+        self.chosen: dict[tuple[int, int], tuple] = {}  # launcher -> its last rule's tile
 
         self.ti = STARTING_TITANIUM
         self.scale = {k: 1.0 for k in BASE_COST}
@@ -164,9 +165,19 @@ class Sim:
         return (self.in_bounds(p) and self.env(p) != WALL
                 and p not in self.buildings and p not in self.bots.values())
 
-    def buildable(self, p):
-        return (self.in_bounds(p) and self.env(p) == EMPTY
-                and p not in self.buildings and p not in self.bots.values())
+    def buildable(self, p, what="barrier"):
+        """Is `what` placeable on `p` right now?
+
+        Ore is buildable -- probed against the engine, `can_build_conveyor` and
+        `can_build_barrier` both return True on an ore tile, and only WALL is
+        excluded. A harvester is the reverse: it is the one thing that must be on
+        ore and cannot go anywhere else.
+        """
+        if not self.in_bounds(p) or p in self.buildings or p in self.bots.values():
+            return False
+        if what == "harvester":
+            return self.env(p) == ORE
+        return self.env(p) != WALL
 
     def cost(self, kind):
         return int(self.scale[kind] * BASE_COST[kind])
@@ -273,14 +284,74 @@ class Sim:
         self.order.append(("bot", role))
         self.trace.append(f"t{self.turn:<3} core       spawn role {role} at {tile}")
 
+    def throw_target(self, lpos, dst):
+        """Resolve a scripted throw's destination the way the bot resolves it.
+
+        Reimplements `units/opener._throw_target` rather than importing it -- it
+        needs a live Controller -- so the two have to be kept in step, and the
+        metric is the one that matters: distance to their core's CORNER, exactly
+        as `_near_core` measures it. Where that has a tie the two may disagree,
+        so the tie is reported rather than silently resolved.
+        """
+        if dst == self.ops.SAME:
+            return self.chosen.get(lpos)
+        if dst == self.ops.NEAR_CORE:
+            self.chosen[lpos] = self.near_core(lpos)
+        elif isinstance(dst[0], str):                 # (FLANK, tile)
+            want = self._p(dst[1])
+            self.chosen[lpos] = want if self.free(want) else self.near_core(lpos, want)
+        else:
+            return self._p(dst)
+        return self.chosen[lpos]
+
+    def near_core(self, lpos, beside=None):
+        """The in-range tile nearest their core, optionally on one side of it."""
+        cx, cy = self.their_core
+        axis = low = None
+        if beside is not None:
+            if beside[0] < cx or beside[0] > cx + 1:
+                axis, low = 0, beside[0] < cx
+            else:
+                axis, low = 1, beside[1] < cy
+        best = []
+        best_d = None
+        for dy in range(-5, 6):
+            for dx in range(-5, 6):
+                if not 0 < dx * dx + dy * dy <= LAUNCHER_RANGE_SQ:
+                    continue
+                t = (lpos[0] + dx, lpos[1] + dy)
+                if not self.in_bounds(t) or not self.free(t):
+                    continue
+                if axis is not None:
+                    v, edge = (t[axis], cx if axis == 0 else cy)
+                    if not (v < edge if low else v > edge + 1):
+                        continue
+                d = (t[0] - cx) ** 2 + (t[1] - cy) ** 2
+                if best_d is None or d < best_d:
+                    best_d, best = d, [t]
+                elif d == best_d:
+                    best.append(t)
+        if not best:
+            return None
+        if len(best) > 1:
+            self.warn("launcher", f"{lpos} rule ties between {best} at d^2={best_d} "
+                                  f"from their core; the engine's own tile order "
+                                  f"decides, so this is not checkable")
+        return best[0]
+
     def launcher_turn(self, lpos):
         q = self.launcher_q.get(lpos)
         if not q or lpos not in self.buildings:
             return
-        src, dst = self._p(q[0][1]), self._p(q[0][2])
+        src = self._p(q[0][1])
         role = next((r for r, p in self.bots.items() if p == src), None)
         if role is None:
             return                       # nobody standing on the pickup tile yet
+        dst = self.throw_target(lpos, q[0][2])
+        if dst is None:
+            self.err("launcher", f"{lpos} -> rule {q[0][2]!r} resolves to no tile")
+            q.pop(0)
+            return
         d2 = (dst[0] - lpos[0]) ** 2 + (dst[1] - lpos[1]) ** 2
         if d2 > LAUNCHER_RANGE_SQ:
             self.err("launcher", f"{lpos} -> {dst} is out of range "
@@ -295,15 +366,33 @@ class Sim:
         if pick2 == 2:
             self.warn("launcher", f"{lpos} picks up diagonally from {src}; "
                                   f"orthogonal pickup is the verified case")
+        if dst in self.bots.values():
+            # A builder is still standing on the landing tile. Not an error and
+            # not a stall: `can_launch` returns False, the launcher keeps the op
+            # and tries again next round, and the builder in the way is on its
+            # own way somewhere. A relay does this every time, because the tile
+            # one builder is thrown FROM is the tile the next is thrown TO.
+            return
         if not self.free(dst):
             self.err("launcher", f"{lpos} -> {dst} is not a passable landing tile "
                                  f"({'wall' if self.env(dst) == WALL else 'occupied'})")
             q.pop(0)
             return
         self.bots[role] = dst
-        q.pop(0)
+        raw = q.pop(0)[2]
+        rule = f" [{raw!r}]" if isinstance(raw, str) or isinstance(raw[0], str) else ""
         self.trace.append(f"t{self.turn:<3} launcher   {lpos} throws role {role} "
-                          f"{src} -> {dst} (d^2={d2})")
+                          f"{src} -> {dst}{rule} (d^2={d2})")
+
+    def launcher_in_reach(self, p):
+        """Is a friendly launcher within pickup reach (d^2 <= 2) of `p`?
+
+        The runtime asks the same question of `map_info`'s launcher mask; here
+        the only launchers on the board are the ones the script itself built.
+        """
+        return any(kind == "launcher"
+                   and (t[0] - p[0]) ** 2 + (t[1] - p[1]) ** 2 <= 2
+                   for t, kind in self.buildings.items())
 
     def check_claim(self, role):
         """Would this builder claim the role the script means it to?
@@ -320,6 +409,7 @@ class Sim:
         for r, prog in enumerate(self.spec["builders"]):
             by_spawn = r < len(script) and self._p(script[r][1]) == me
             by_wait = (prog and prog[0][0] == self.ops.WAIT
+                       and not isinstance(prog[0][1], str)   # RELAY names no tile
                        and self._p(prog[0][1]) == me)
             if not (by_spawn or by_wait):
                 continue
@@ -342,6 +432,11 @@ class Sim:
             kind = op[0]
             pos = self.bots[role]
             if kind == self.ops.WAIT:
+                if op[1] == self.ops.RELAY:
+                    if self.launcher_in_reach(pos):
+                        return        # a launcher can still pick us up
+                    q.pop(0)
+                    continue          # the relay is over: carry on this turn
                 if pos == self._p(op[1]):
                     q.pop(0)
                     continue          # landed: start the next op the same turn
@@ -442,12 +537,12 @@ class Sim:
                     self.err(f"role {role}", f"build {what} at {tile}: tile is wall")
                     q.clear()
                     return
-                if self.env(tile) == ORE and what != "harvester":
-                    self.err(f"role {role}", f"build {what} at {tile}: tile is ore "
-                                             f"(only a harvester may go there)")
+                if self.env(tile) != ORE and what == "harvester":
+                    self.err(f"role {role}", f"build harvester at {tile}: not an ore "
+                                             f"tile ({KIND[self.env(tile)]})")
                     q.clear()
                     return
-                if not self.buildable(tile):
+                if not self.buildable(tile, what):
                     return            # transiently occupied; retry next turn
                 is_barrier = what == "barrier"
                 ok, c, r = self.afford(what, reserved=False)

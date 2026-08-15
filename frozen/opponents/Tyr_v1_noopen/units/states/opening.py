@@ -460,23 +460,6 @@ def _enemy_distance_sq(tile) -> int:
     return best
 
 
-def _enemy_can_heal(tile) -> bool:
-    """Is an enemy builder orthogonally next to `tile`, able to out-heal us?
-
-    A builder heals 4 HP for 1 Ti and attacks for 2 damage at 2 Ti, so one enemy
-    beside the target beats one of ours in front of it, twice over on both
-    counts. Only a sentinel's 18 breaks that.
-    """
-    for d in map_info._CARDINAL:
-        p = map_info.pos_add(tile, d)
-        if not map_info.in_bounds(p):
-            continue
-        bot = rc.get_tile_builder_bot_id(p)
-        if bot is not None and rc.get_team(bot) != map_info._my_team:
-            return True
-    return False
-
-
 def _guard_target():
     """The barrier to be standing next to: weakest first, then most threatened.
 
@@ -543,6 +526,23 @@ def _enemy_building_at(tile) -> bool:
     """
     bid = rc.get_tile_building_id(tile)
     return bid is not None and rc.get_team(bid) != map_info._my_team
+
+
+def _enemy_can_heal(tile) -> bool:
+    """Is an enemy builder orthogonally next to `tile`, able to out-heal us?
+
+    A builder heals 4 HP for 1 Ti and attacks for 2 damage at 2 Ti, so one enemy
+    beside the target beats one of ours in front of it, twice over on both
+    counts. Only a sentinel's 18 breaks that.
+    """
+    for d in map_info._CARDINAL:
+        p = map_info.pos_add(tile, d)
+        if not map_info.in_bounds(p):
+            continue
+        bot = rc.get_tile_builder_bot_id(p)
+        if bot is not None and rc.get_team(bot) != map_info._my_team:
+            return True
+    return False
 
 
 def _release(why: str) -> None:
@@ -725,15 +725,11 @@ def run():
                 break
             bid = rc.get_tile_building_id(tile)
             if bid is not None and rc.get_team(bid) != map_info._my_team:
-                if opener.strike_stands_off():
-                    log(f"OPENER role {_role} leaves {tile}: enemy building on it")
-                    _step += 1
-                    continue
                 # Hitting it alone while an enemy builder stands beside it is
                 # worse than doing nothing: they restore 4 HP for 1 Ti and we
-                # remove 2 for 2. Hold instead and let a scripted sentinel's 18
-                # land -- it holds fire for a builder to be adjacent, so our own
-                # hit completes the 20 the same turn.
+                # remove 2 for 2. Hold instead and let the scripted sentinel's
+                # 18 land -- it is holding fire for a builder to be adjacent, so
+                # our own hit completes the 20 the same turn.
                 if _enemy_can_heal(tile):
                     break
                 if has_op() and rc.can_fire(tile):
