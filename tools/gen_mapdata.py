@@ -33,9 +33,17 @@ EMPTY, WALL, ORE = 0, 1, 2
 # --- .map26 wire format -----------------------------------------------------
 # Protobuf without a published schema; field numbers recovered by inspection and
 # cross-checked against a probe bot run in the real engine (see git history):
-#   f1 width, f2 height, f3 repeated row {f1: bytes, one byte per tile},
+#   f1 width, f2 height, f3 repeated row {f1: tiles},
 #   f4 repeated core {f1 id, f2 team (absent == 0 == A), f3 pos {f1 x, f2 y}}
-# Row bytes are terrain codes; rows[y][x] matches the engine's get_tile_env.
+# Row tiles are terrain codes; rows[y][x] matches the engine's get_tile_env.
+#
+# A row's tiles come in two encodings and both are still in the pool. The maps
+# shipped up to the August sync pack a row as a single length-delimited blob,
+# one byte per tile; the ten maps added by that sync write the same row as a
+# repeated varint field instead (a proto3 writer that stopped packing, most
+# likely). They are distinguishable by wire type alone, so both are accepted --
+# an old map read under only the new rule yields zero rows and the dimension
+# check below fires, which is exactly how this was found.
 def _varint(b: bytes, i: int) -> tuple[int, int]:
     result = shift = 0
     while True:
@@ -80,9 +88,15 @@ def parse_map(path: Path) -> dict:
         elif fn == 2 and wt == 0:
             h = v
         elif fn == 3 and wt == 2:
+            row: list[int] = []
             for sfn, swt, sv in _fields(v):
-                if sfn == 1 and swt == 2:
-                    rows.append(list(sv))
+                if sfn != 1:
+                    continue
+                if swt == 2:      # blob encoding: one byte per tile
+                    row.extend(sv)
+                elif swt == 0:    # varint encoding: one field per tile
+                    row.append(sv)
+            rows.append(row)
         elif fn == 4 and wt == 2:
             team = 0
             pos = None
@@ -435,12 +449,19 @@ bitmasks stay as hex text until a candidate actually matches, so a bot on a
 30x30 map never pays to parse the 10x10 entries. `hardcode.py` owns all of that.
 
 Per entry:
-    (name, core_a, core_b, sym, wall_hex, ore_hex)
+    (name, core_a, core_b, sym, wall_hex, ore_hex, facts)
       core_*   top-left corner of that team's 2x2 core (team A first)
       sym      'h' | 'v' | 'r': the single flip that both preserves the terrain
                and maps core A onto core B, matching map_info.flip()'s ordering.
                '' when the map is not a symmetric pair.
       *_hex    bitmask over bit index x + y*width
+      facts    strategy values derived from the terrain offline, so no unit ever
+               pays to recompute them:
+                 cd     cardinal BFS steps between the two core footprints --
+                        how close the fight starts. 6 on meander, 36 on saga.
+                 ore_a  ore we should farm as team A, as tile indices, nearest
+                        first, restricted to ore we reach no later than the
+                        enemy. ore_b is the same list for team B.
 """
 
 '''
