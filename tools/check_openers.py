@@ -137,6 +137,7 @@ class Sim:
         self.first_run: dict[int, int] = {}     # role -> first turn it may act
         self.claimed: dict[int, bool] = {}      # role -> claim rule checked
         self.done_at: dict[int, int] = {}
+        self.given_up: set = set()
         # Actors in creation order, which is entity-id order and so turn order.
         self.order: list[tuple] = [("core",)]
         self.turn = 0
@@ -495,6 +496,48 @@ class Sim:
                 self.trace.append(f"t{self.turn:<3} role {role}     took {tile} "
                                   f"with {op[2]} (ti now {self.ti})")
                 q.pop(0)
+                return
+
+            if kind == self.ops.SEAL:
+                todo = [self._p(t) for t in op[1]
+                        if self._p(t) not in self.buildings
+                        and self._p(t) not in self.given_up]
+                if not todo:
+                    q.pop(0)
+                    continue
+                tile = todo[0]        # list order, as the runtime does
+                if tile == pos:       # standing on it; step off, as the bot does
+                    for dx, dy in CARDINALS:
+                        step = (pos[0] + dx, pos[1] + dy)
+                        if self.free(step):
+                            self.bots[role] = step
+                            break
+                    return
+                if self.env(tile) == WALL:
+                    self.err(f"role {role}", f"seal target {tile} is wall")
+                    q.clear()
+                    return
+                if abs(tile[0] - pos[0]) + abs(tile[1] - pos[1]) != 1:
+                    p = self.path(pos, tile)
+                    if p is None or len(p) < 2:
+                        # Unreachable is not fatal -- the bot writes the tile off
+                        # and carries on down the list, so model that and note it.
+                        self.warn(f"role {role}", f"cannot reach {tile} from {pos}; "
+                                                  f"skipped, rest of the seal continues")
+                        self.given_up.add(tile)
+                        continue
+                    self.bots[role] = p[1]
+                    return
+                ok, c, r = self.afford(op[2], reserved=False)
+                if not ok:
+                    return
+                self.pay(op[2])
+                self.buildings[tile] = op[2]
+                if op[2] == "barrier":
+                    self.barriers_built += 1
+                    self.barriers_total += 1
+                self.trace.append(f"t{self.turn:<3} role {role}     sealed {tile} "
+                                  f"(ti now {self.ti})")
                 return
 
             if kind == self.ops.ASSAULT:
