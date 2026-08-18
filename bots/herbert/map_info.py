@@ -227,6 +227,24 @@ conv_load: list[float] = []
 # rounds up into quartile k: [0]=(0,1/4], [1]=(1/4,1/2], [2]=(1/2,3/4], [3]=(3/4,1].
 # Load 0 is in no bucket. Bucket k == ceil(load*4).
 conv_load_buckets: list[int] = [0, 0, 0, 0]
+# Conveyors whose titanium is jammed (not physically moving). A visible conveyor
+# is "base-stuck" when the resource-stack id sitting on it hasn't changed for long
+# enough that its not-stuck grace expired; ANY id change (a stack advanced off it,
+# arrived, or drained) refreshes the grace to _CONV_STUCK_GRACE turns, so a belt
+# whose load moves at least once every 4 turns never reads as stuck. Base-stuck then
+# floods UPSTREAM along the flow graph (a jam backs up the belts feeding it).
+# Computed in _recompute_derived_loaded alongside _bm_ti_carrying, and PERSISTENT
+# just like it: a conveyor's base-stuck bit is refreshed while the tile is visible
+# and frozen at its last-observed value while out of vision, and the flood runs over
+# every known conveyor -- so conv_stuck covers out-of-vision tiles too. AND
+# `~conv_stuck` into any "loaded conveyor" test to target only belts whose titanium
+# is actually flowing.
+conv_stuck: int = 0
+_conv_base_stuck: int = 0                # persistent: last-observed base-stuck bit per conveyor
+_conv_res_id: dict[int, int] = {}       # conveyor tile -> last-observed resource-stack id (0 = empty)
+_conv_stuck_grace: dict[int, int] = {}  # conveyor tile -> turns of forced-not-stuck left
+_conv_stuck_round: int = -1             # round conv_stuck was last computed (compute once/turn)
+_CONV_STUCK_GRACE = 4
 _bm_dead_end: int = 0           # possible places to route from, defined by the targets of any conveyor types heading into nothing or a building that is not a (conveyor type, my core, my sentinel, or my gunner). also includes my conveyors pointing into an enemy building (update only in update)
 _bm_my_turret_claims: int = 0     # tiles already covered by one of my turrets (gunner ray or sentinel line) (update only in update)
 _bm_my_gunner_rays: int = 0       # just the GUNNER-ray tiles of the above -- blockable line of fire; placement avoids these so a new turret can't block my gunner (update only in update)
@@ -252,12 +270,19 @@ _bm_hp_changed: int = 0           # visible building tiles whose HP changed vs l
 # Builder bot tracking
 _bm_friendly_bots: int = 0       # bitmask of known friendly builder bot positions
 _bm_enemy_bots: int = 0          # bitmask of known enemy builder bot positions
+_bm_friendly_stationary: int = 0 # friendly bots seen on the SAME tile last turn and this turn (parked -- routed around, not followed, in the is_route=False avoid)
 _bot_pos: dict[int, int] = {}    # uid -> tile index (both teams)
 _bot_team: dict[int, int] = {}   # uid -> team_idx
 _bot_at: dict[int, int] = {}    # tile index -> uid
 _bot_last_seen: dict[int, int] = {}   # uid -> round it was last seen alive in vision
 _bot_pos_history: dict[int, list[int]] = {}  # uid -> newest-first observed tile indices
 _BOT_HISTORY_LIMIT = 12
+# Teammates pulled from the global comm store (up to 14 builder slots) carry no real
+# id, so each is tracked under a synthetic uid = _COMM_UID_BASE + tile: unique per
+# tile, never collides with a real (small) bot id, and -- being huge -- never counts
+# as a "lower id" in chip's id-priority claim. See add_comm_allies().
+_COMM_UID_BASE = 1_000_000
+_bm_comm_prev: int = 0           # last turn's comm-ally tile mask (for parked detection)
 
 _max_id_by_round: list[int] = []  # max_id_by_round[round] = max entity id seen up to that round
 _max_id_seen: int = 0
@@ -1146,6 +1171,7 @@ def init(c: Controller):
     global _my_team, _my_team_idx
     global _building_id, _building_et_idx, _building_hp, _building_dir, _building_conv_target, _conv_reverse
     global conv_dist_core, conv_load, conv_load_buckets
+    global conv_stuck, _conv_base_stuck, _conv_res_id, _conv_stuck_grace, _conv_stuck_round
     global _bm_et, _bm_team, _bm_env
     global _left_col, _right_col, _bottom_row, _top_row, _not_left_col, _not_right_col, _not_bottom_row, _not_top_row
     global _board_mask, _bm_dir
@@ -1174,6 +1200,11 @@ def init(c: Controller):
     conv_dist_core        = [-1] * tiles
     conv_load             = [0.0] * tiles
     conv_load_buckets     = [0, 0, 0, 0]
+    conv_stuck            = 0
+    _conv_base_stuck      = 0
+    _conv_res_id          = {}
+    _conv_stuck_grace     = {}
+    _conv_stuck_round     = -1
 
     _bm_et   = [0] * _NUM_ET
     _bm_team = [0] * _NUM_TEAM
@@ -1864,9 +1895,82 @@ def _compute_conv_load() -> None:
             conv_load_buckets[bucket - 1] |= 1 << n
 
 
+def _recompute_conv_stuck() -> None:
+    """Refresh `conv_stuck` -- the conveyors with titanium physically jammed on them.
+
+    Persistent, exactly like `_bm_conv_ti`/`_bm_ti_carrying`: a conveyor's base-stuck
+    bit is re-observed while its tile is visible and FROZEN at its last-observed value
+    while out of vision, then the jam floods UPSTREAM over EVERY known conveyor -- so
+    conv_stuck covers out-of-vision tiles, not just what we can currently see.
+
+    Observation (visible conveyors): read the id of the resource stack sitting on the
+    belt. Any change since last observation (a stack advanced off it, arrived, or
+    drained) refreshes a `_CONV_STUCK_GRACE`-turn not-stuck grace; otherwise the grace
+    ticks down. A belt is base-stuck once it still holds a stack (id != 0) whose grace
+    has run out -- the same stack has sat there past the window -- so a belt whose load
+    moves at least once every 4 turns never reads as stuck.
+
+    Runs at most once per turn (the grace must tick exactly once even though
+    `recompute_derived` can fire twice on a comms-dirty turn)."""
+    global conv_stuck, _conv_base_stuck, _conv_stuck_round
+    rnd = _rc.get_current_round()
+    if rnd == _conv_stuck_round:
+        return
+    _conv_stuck_round = rnd
+
+    get_res_id = _rc.get_stored_resource_id
+    building_id = _building_id
+    all_convs = _bm_conveyors
+    _conv_base_stuck &= all_convs                    # forget tiles no longer conveyors
+    m = all_convs & _bm_visible
+    while m:
+        lsb = m & -m
+        n = lsb.bit_length() - 1
+        m ^= lsb
+        eid = building_id[n]
+        rid = get_res_id(eid) if eid is not None and eid >= 0 else None
+        rid = rid or 0                               # empty conveyor -> 0
+        old = _conv_res_id.get(n)
+        if old is None or rid != old:
+            g = _CONV_STUCK_GRACE                    # id changed -> forced not-stuck
+        else:
+            g = _conv_stuck_grace.get(n, _CONV_STUCK_GRACE) - 1
+            if g < 0:
+                g = 0
+        _conv_res_id[n] = rid
+        _conv_stuck_grace[n] = g
+        if rid != 0 and g == 0:                      # loaded, grace expired -> stuck
+            _conv_base_stuck |= lsb
+        else:
+            _conv_base_stuck &= ~lsb
+
+    # A jam backs up its feeders: flood upstream over ALL known conveyors (visible or
+    # not) so the belief reaches tiles we cannot currently see.
+    conv_reverse = _conv_reverse
+    stuck = _conv_base_stuck
+    frontier = _conv_base_stuck
+    while frontier:
+        nxt = 0
+        f = frontier
+        while f:
+            lsb = f & -f
+            a = lsb.bit_length() - 1
+            f ^= lsb
+            nxt |= conv_reverse[a]
+        nxt &= all_convs & ~stuck
+        stuck |= nxt
+        frontier = nxt
+    conv_stuck = stuck
+
+
 def _recompute_derived_loaded() -> None:
     global _bm_ti_carrying
     global _recompute_loaded_cache_key
+
+    # conv_stuck tracks physically-jammed belts and must tick its not-stuck grace
+    # every turn -- a stack can sit or advance without changing _bm_conv_ti -- so it
+    # runs unconditionally, NOT under the (struct, observed-ti) cache below.
+    _recompute_conv_stuck()
 
     key = (_struct_version, _bm_conv_ti)
     if key == _recompute_loaded_cache_key:
@@ -1900,7 +2004,7 @@ def update(recompute: bool = True) -> None:
     global _rush_tiebroken, _predicted_enemy_core
     global _bm_any_building, _bm_hp_changed, _building_hp_prev
     global _bm_seen, _bm_visible, _prev_pos, _nearby_tiles, _nearby_tiles_pos, _my_pos
-    global _bm_friendly_bots, _bm_enemy_bots
+    global _bm_friendly_bots, _bm_enemy_bots, _bm_friendly_stationary
     global _bm_others_5x5, _bm_others_3x3
     global _max_id_seen
     global _struct_version
@@ -2060,6 +2164,16 @@ def update(recompute: bool = True) -> None:
     # --- Update builder bot tracking ---
     _bm_friendly_bots = 0
     _bm_enemy_bots = 0
+    _bm_friendly_stationary = 0
+    # Drop last turn's synthetic comm-store allies before the vision rebuild -- they
+    # are re-derived fresh by add_comm_allies() after comms.read(), so the loops below
+    # only ever see real, seen bots.
+    for uid in [u for u in _bot_pos if u >= _COMM_UID_BASE]:
+        cn = _bot_pos.pop(uid)
+        _bot_team.pop(uid, None)
+        if _bot_at.get(cn) == uid:
+            del _bot_at[cn]
+    prev_pos = dict(_bot_pos)            # each real bot's BELIEVED tile at end of last turn
     seen_uids = set()
     cur_round = rc.get_current_round()
     self_id = rc.get_id()
@@ -2099,6 +2213,14 @@ def update(recompute: bool = True) -> None:
                 continue
         if _bot_team[uid] == my_team_idx:
             _bm_friendly_bots |= bit
+            # Parked teammate: its BELIEVED tile is unchanged since last turn. Because
+            # _bot_pos holds a bot's tile put while it is out of vision, this stays set
+            # through a bot leaving vision only because *I* moved -- it did not move, we
+            # just can't see it. A bot we actually watch step away (its tile is still
+            # visible but it's no longer there) fails the `seen-or-not-visible` guard
+            # and correctly drops out.
+            if prev_pos.get(uid) == n and (uid in seen_uids or not (bm_visible & bit)):
+                _bm_friendly_stationary |= bit
         else:
             _bm_enemy_bots |= bit
     for uid in to_remove:
@@ -2127,6 +2249,38 @@ def update(recompute: bool = True) -> None:
 
     if recompute:
         recompute_derived()
+
+
+def add_comm_allies(positions) -> None:
+    """Fold teammates broadcast on the global comm store into the friendly-bot masks
+    and tracking, so allies we cannot currently see are still treated as bots to route
+    around / not move onto. Call ONCE per turn, AFTER `comms.read()` and `update()`
+    (which drops the previous turn's synthetic entries first).
+
+    Each comm ally is tracked under a synthetic uid = _COMM_UID_BASE + tile -- it has
+    no real id -- so it is unique, never collides with a real bot, and being huge it
+    never counts as a "lower id" in chip's id-priority claim. A comm tile already held
+    by a real (vision) sighting is skipped; vision is authoritative. A comm ally counts
+    as parked (added to _bm_friendly_stationary) when a comm ally held the same tile
+    last turn."""
+    global _bm_friendly_bots, _bm_friendly_stationary, _bm_comm_prev
+    w = _width
+    my_n = _my_pos.x + _my_pos.y * w
+    occupied = _bm_friendly_bots | _bm_enemy_bots
+    comm = 0
+    for cp in positions:
+        n = cp.x + cp.y * w
+        b = 1 << n
+        if n == my_n or (occupied & b):
+            continue                            # myself, or a real sighting already here
+        comm |= b
+        uid = _COMM_UID_BASE + n
+        _bot_pos[uid] = n
+        _bot_team[uid] = _my_team_idx
+        _bot_at[n] = uid
+    _bm_friendly_bots |= comm
+    _bm_friendly_stationary |= comm & _bm_comm_prev   # same comm tile last turn -> parked
+    _bm_comm_prev = comm
 
 
 def is_tile_empty(pos: Position):
@@ -2171,23 +2325,25 @@ def get_avoid(is_route: bool, enemy_pov: bool = False) -> int:
 
     Both modes avoid walls, both cores, and every building except conveyors.
       - is_route=False (builder movement): also avoids tiles adjacent to enemy
-        launchers and enemy bots.
+        launchers, enemy bots, and PARKED friendly bots (_bm_friendly_stationary --
+        a teammate that held its tile from last turn is routed around, not queued
+        behind; a moving teammate is still flooded through so we can follow it).
       - is_route=True (conveyor routing): also avoids all conveyors, all
         threatened tiles, the output targets of our own conveyors, and every
         non-landlocked ore.
     enemy_pov models the enemy's own pathing, so it drops the avoidances that are
-    ours alone (enemy-turret threat and enemy-launcher/bot avoidance).
+    ours alone (enemy-turret threat and enemy-launcher/bot/parked-teammate avoidance).
 
     Cached per (is_route, enemy_pov) on the exact state each variant reads:
     everything is struct-versioned except the routing landlocked/ore terms (which
-    track _bm_seen) and our own movement's enemy-bot avoidance (which tracks
-    _bm_enemy_bots). All three are constant within a unit's turn, so repeated
-    pathing calls hit the cache."""
+    track _bm_seen) and our own movement's enemy-bot + parked-teammate avoidance
+    (which track _bm_enemy_bots / _bm_friendly_stationary). All are constant within a
+    unit's turn, so repeated pathing calls hit the cache."""
     ck = (is_route, enemy_pov)
     if is_route:
         key = (_struct_version, _bm_seen)
     elif not enemy_pov:
-        key = (_struct_version, _bm_enemy_bots)
+        key = (_struct_version, _bm_enemy_bots, _bm_friendly_stationary)
     else:
         key = _struct_version
     hit = _avoid_cache.get(ck)
@@ -2222,6 +2378,7 @@ def _compute_avoid(is_route: bool, enemy_pov: bool) -> int:
     elif not enemy_pov:
         mask |= _bm_enemy_launch_adj
         mask |= _bm_enemy_bots
+        mask |= _bm_friendly_stationary
     return mask
 
 

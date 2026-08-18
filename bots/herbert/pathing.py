@@ -40,8 +40,8 @@ def voronoi_claim(my_mask, others_mask, claims, passable=None):
     if passable is None:
         passable = map_info.passable()
 
-    my_front = my_mask & passable
-    other_front = others_mask & passable
+    my_front = my_mask
+    other_front = others_mask
     my_claims = 0
     all_claimed = my_front | other_front
 
@@ -139,6 +139,7 @@ class Pathing:
         max_dist: int | None = None,
         avoid: int = 0,
         side: bool = True,
+        to_adjacent: bool = True,
     ) -> tuple[Position | None, int]:
         """Shared bitmask BFS for closest-target queries.
 
@@ -160,6 +161,13 @@ class Pathing:
         default) is our perspective — uses `map_info.passable()` which
         avoids enemy threat. False models the enemy's pathing: same blockers
         minus the enemy's own threat (they wouldn't avoid it).
+
+        `to_adjacent` selects what "reaching" a target means. True (the default)
+        returns the distance to a tile ORTHOGONALLY ADJACENT to a target -- the
+        usual case, since targets are buildings we act on from a neighbour. False
+        returns the distance to move ONTO the target tile itself (e.g. chip wants
+        to stand on the tile); the target tiles are made passable so the search
+        may walk onto them.
         """
         if targets == 0 or start == 0:
             return None, -1
@@ -173,13 +181,15 @@ class Pathing:
             )
         if avoid:
             passable &= ~avoid
+        if not to_adjacent:
+            passable |= targets
         visited = start
         frontier = start
         dist = 0
         nlc = map_info._not_left_col
         nrc = map_info._not_right_col
         while frontier:
-            hit = map_info.manhattan(frontier) & targets
+            hit = (frontier if not to_adjacent else map_info.manhattan(frontier)) & targets
             if hit:
                 lsb = hit & -hit
                 n = lsb.bit_length() - 1
@@ -198,15 +208,17 @@ class Pathing:
         pos=None,
         avoid: int = 0,
         side: bool = True,
+        to_adjacent: bool = True,
     ) -> tuple[Position | None, int]:
         """Find closest bit in *targets* from *pos* with full search.
 
         `pos` accepts None (defaults to my_pos), a single Position, a bitmask
         int, or any iterable of Positions — BFS expands from all start tiles
-        simultaneously and returns the closest target."""
+        simultaneously and returns the closest target. `to_adjacent=False`
+        measures distance to move ONTO the target rather than adjacent to it."""
         return self._closest_impl(
             targets, start=self._coerce_start(pos), max_dist=None,
-            avoid=avoid, side=side,
+            avoid=avoid, side=side, to_adjacent=to_adjacent,
         )
 
     def closest_within(
@@ -216,14 +228,16 @@ class Pathing:
         max_dist: int = 0,
         avoid: int = 0,
         side: bool = True,
+        to_adjacent: bool = True,
     ) -> tuple[Position | None, int]:
         """Find the closest target if it is within `max_dist`, else (None, -1).
 
         `pos` accepts None, a Position, a bitmask int, or an iterable of
-        Positions (see `closest`)."""
+        Positions (see `closest`). `to_adjacent=False` measures distance to move
+        ONTO the target rather than adjacent to it."""
         return self._closest_impl(
             targets, start=self._coerce_start(pos), max_dist=max_dist,
-            avoid=avoid, side=side,
+            avoid=avoid, side=side, to_adjacent=to_adjacent,
         )
 
     def __init__(self, c: Controller):
@@ -759,8 +773,8 @@ class Pathing:
         
         if DRAW_DEBUG:
             s_pos, p_pos, _ = result
-            self.rc.draw_indicator_line(s_pos, p_pos, 255, 0, 255)
-            self.rc.draw_indicator_dot(s_pos, 255, 0, 255)
+            # self.rc.draw_indicator_line(s_pos, p_pos, 255, 0, 255)
+            # self.rc.draw_indicator_dot(s_pos, 255, 0, 255)
 
         return result
 

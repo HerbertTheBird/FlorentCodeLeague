@@ -174,16 +174,18 @@ def _update_initial_explore(current_round: int):
         _initial_explore_target = None
 
 
-def select_best_state():
+def select_best_state(can_move=True, exclude=None):
     best_state = None
     best_score = 0
 
     for state in states:
+        if state is exclude:
+            continue
         # Since states are sorted, break early if we can't beat best score
         if best_score >= state.MAX_SCORE:
             break
 
-        score = state.score()
+        score = state.score(can_move)
         if score > best_score:
             best_score = score
             best_state = state
@@ -268,4 +270,14 @@ def run():
     # That is dead code in Florent: fire() only damages the building on the
     # target tile, so can_fire on a bot-only tile is always False.)
     heal._do_best_heal()
+
+    # Free-action retry: if we've neither moved nor acted this turn, our single
+    # move-or-action is still unspent. Rather than waste it, pick the best thing
+    # we can do WITHOUT moving (a DIFFERENT state than we already chose) and do
+    # only its in-place action -- so we hold position but still use the action.
+    if has_op():
+        second = select_best_state(can_move=False, exclude=best_state)
+        if second is not None:
+            second.run(False)
+
     comms.write()

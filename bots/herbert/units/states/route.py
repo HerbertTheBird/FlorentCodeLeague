@@ -97,7 +97,7 @@ def cant_claim():
     my_bit = 1 << (my_pos.x + my_pos.y * map_info._width)
     return map_info._bm_others_3x3 & ~map_info.expand_chebyshev(my_bit)
 
-def _my_claims():
+def _my_claims(repair=False):
     my_pos = map_info._my_pos
     my_mask = 1 << (my_pos.x + my_pos.y * map_info._width)
 
@@ -114,6 +114,14 @@ def _my_claims():
     if my_harvesters:
         candidates |= my_harvesters & not_blocked()
 
+    if repair:
+        # Repair-quality: only a candidate one hop from the accepting network --
+        # cardinally adjacent to a valid route target (a conveyor whose chain
+        # already reaches the core, or the core itself). Scores at the higher
+        # repair tier (formerly the separate route_repair state).
+        valid_route_targets = map_info._bm_route_targets | map_info._bm_my_core_area
+        candidates &= map_info.expand_manhattan(valid_route_targets)
+
     if units.builder._stay_near_core:
         candidates &= units.builder.near_core_mask()
     # Route has the highest MAX_SCORE, so this runs first for every builder on
@@ -126,6 +134,7 @@ def _my_claims():
         | cant_claim()
         | _unpathable_mask()
     )
+    units.builder.draw_mask(pathing.claim_subset(my_mask, map_info._bm_friendly_bots, candidates & ~avoid, tie_self=True), 0, 255, 0)
     return pathing.claim_subset(my_mask, map_info._bm_friendly_bots, candidates & ~avoid, tie_self=True)
 
 _cached_target = None        # (destroy, nxt, seg_dist) picked+validated in score()
@@ -198,12 +207,14 @@ def _plan_next_action():
     return None
 
 
-def _find_route_target():
+def _find_route_target(repair=False):
     """Scan claimed candidates and return the first (destroy, nxt, seg_dist) we can
     actually route -- pathable and affordable -- or None. Doing this in score()
     (rather than run()) means route isn't selected at all when nothing is
-    reachable, so a lower state gets the turn instead of it being wasted."""
-    candidates = _my_claims()
+    reachable, so a lower state gets the turn instead of it being wasted. With
+    repair=True only candidates one hop from the network are considered, and every
+    conveyor end is seeded at cost 0 (end_cost_mask=0)."""
+    candidates = _my_claims(repair)
     if not candidates:
         return None
     width = map_info._width
@@ -221,8 +232,9 @@ def _find_route_target():
         cand_is_harvester = bool(map_info._bm_et[map_info._IDX_HARVESTER] & cand_bit)
         # Seed only the core at cost 0 (every conveyor end pays conveyor_end_cost),
         # so a nearer attach always wins on distance regardless of loaded state.
-        cand_path = nav.calculate_conveyor_path(candidate, update=not cand_is_harvester,
-                                                end_cost_mask=map_info._bm_conveyors)
+        cand_path = nav.calculate_conveyor_path(
+            candidate, update=not cand_is_harvester,
+            end_cost_mask=(0 if repair else map_info._bm_conveyors))
         if cand_path is None:
             _mark_unpathable(cand_bit)
             candidates &= ~cand_bit
@@ -255,33 +267,46 @@ def _adjacent_to_me(pos) -> bool:
     return abs(pos.x - my.x) + abs(pos.y - my.y) == 1
 
 
-MAX_SCORE = 5
+# Folds in the former route_repair state: a repair-quality target (a candidate one
+# hop from the network) scores REPAIR_SCORE; the opening plan and ordinary dead-end
+# routing score NORMAL_SCORE. MAX_SCORE is the higher of the two so the selection
+# loop's early-break stays correct.
+NORMAL_SCORE = 5
+REPAIR_SCORE = 8
+MAX_SCORE = 8
 def score(can_move=True):
     global _cached_target, _cached_plan_action
-    # Building our own opening plan runs at route's normal tier -- "forced valid"
+    # 1. Repair first -- a candidate one hop from the accepting network -- at the
+    # highest tier (formerly the separate route_repair state, which outranked the
+    # opening plan and ordinary routing).
+    _cached_plan_action = None
+    _cached_target = _find_route_target(repair=True)
+    if _cached_target is not None:
+        if not can_move and not _adjacent_to_me(_cached_target[0]):
+            _cached_target = None
+            return 0
+        return REPAIR_SCORE
+    # 2. Building our own opening plan runs at route's normal tier -- "forced valid"
     # while unbuilt, but not a max that overrides everything: attack (tier 9) can
-    # still preempt it when needed. It takes priority over route's dead-end
-    # routing (and, being tier 5, over harvest/heal), so skip the costlier scan
-    # while a plan is still going up.
+    # still preempt it. We DON'T bail on it just because an enemy or turret threat
+    # showed up -- only once the builder is actually pulled into heal or attack
+    # (builder.run clears conveyor_plan then), after which _plan_next_action returns
+    # None and we fall through to normal routing.
     _cached_plan_action = _plan_next_action()
     if _cached_plan_action is not None:
-        # Keep building the opening plan at route's tier. We DON'T bail on it just
-        # because an enemy or turret threat showed up -- we only give it up once the
-        # builder is actually pulled into heal or attack (builder.run clears
-        # conveyor_plan for good the turn that happens), after which _plan_next_action
-        # returns None and we fall through to normal routing.
         _cached_target = None
         # In-place retry: only if the next plan piece is buildable right here
         # (action[1] is the tile it places -- conveyor pos or harvester ore).
         if not can_move and not _adjacent_to_me(_cached_plan_action[1]):
             _cached_plan_action = None
             return 0
-        return MAX_SCORE
-    units.builder.draw_mask(map_info._bm_dead_end, 0, 0, 255)
-    _cached_target = _find_route_target()
+        return NORMAL_SCORE
+    # 3. Ordinary dead-end routing at route's normal tier.
+    # units.builder.draw_mask(map_info._bm_dead_end, 0, 0, 255)
+    _cached_target = _find_route_target(repair=False)
     if _cached_target is not None and not can_move and not _adjacent_to_me(_cached_target[0]):
         _cached_target = None
-    return MAX_SCORE if _cached_target is not None else 0
+    return NORMAL_SCORE if _cached_target is not None else 0
 
 
 def _run_plan_action(action, can_move=True) -> None:
@@ -347,7 +372,7 @@ def run(can_move=True):
         built = True
 
     # A conveyor built as the last hop (seg_dist == 1) connects the routed source
-    # to a route target, so a real route is completed this turn -- tally it. (Only
-    # plain route counts here; route_repair does NOT.)
+    # to a route target, so a real route is completed this turn -- tally it. Both
+    # repair-tier and ordinary routing count (formerly route + route_repair both did).
     if built and seg_dist == 1:
         comms.note_route_complete()

@@ -119,15 +119,18 @@ def _too_expensive():
 
 MAX_SCORE = 9
 _cached_claims = 0
-def score():
+def score(can_move=True):
     global _cached_claims
     _cached_claims = _my_claims()
+    if not can_move:
+        my_bit = 1 << (map_info._my_pos.x + map_info._my_pos.y * map_info._width)
+        _cached_claims &= map_info.expand_manhattan(my_bit) & ~my_bit
     return MAX_SCORE if _cached_claims else 0
 
 CARD = [Direction.NORTH, Direction.EAST, Direction.SOUTH, Direction.WEST]
 
 
-def run():
+def run(can_move=True):
     global cant_harvest
     log("HARVEST")
 
@@ -137,6 +140,21 @@ def run():
 
     w = map_info._width
     my_team_idx = map_info._my_team_idx
+
+    # Flee-lethal: never stand on a tile that kills us this turn just to
+    # harvest. The move_to below already steps off lethal tiles, but the
+    # early-return paths do not, so escape up front and skip this turn's build.
+    my_pos = map_info._my_pos
+    my_n = my_pos.x + my_pos.y * w
+    lethal = map_info.lethal_mask(rc.get_hp())
+    if can_move and lethal & (1 << my_n):
+        safe = (map_info._board_mask & ~lethal & ~map_info._bm_blocked
+                & ~map_info._bm_friendly_bots) & ~(1 << my_n)
+        if safe:
+            route = nav.bfs_move(my_n, safe, map_info.get_avoid(False))
+            if route is not None and route[1] != my_pos:
+                nav.move(map_info.direction_to(my_pos, route[1]))
+                return
 
     best_ore = None
     path = None
@@ -186,7 +204,7 @@ def run():
             continue
         if map_info.is_passable(p):
             targets.add(p)
-    if targets:
+    if can_move and targets:
         nav.move_to(targets)
     log("targets", targets, path[0])
     # Move to any adjacent tile and build harvester

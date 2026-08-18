@@ -50,11 +50,11 @@ def init(c: Controller):
 
 SENTINEL_BUILDING_SCORE = [0] * map_info._NUM_ET
 SENTINEL_BUILDING_SCORE[map_info._IDX_CORE] = 32 #duplicate value
-SENTINEL_BUILDING_SCORE[map_info._IDX_HARVESTER] = 16
+SENTINEL_BUILDING_SCORE[map_info._IDX_HARVESTER] = 16*0
 SENTINEL_BUILDING_SCORE[map_info._IDX_GUNNER] = 16
 SENTINEL_BUILDING_SCORE[map_info._IDX_SENTINEL] = 32
 SENTINEL_BUILDING_SCORE[map_info._IDX_LAUNCHER] = 16
-SENTINEL_BUILDING_SCORE[map_info._IDX_CONVEYOR] = 4
+SENTINEL_BUILDING_SCORE[map_info._IDX_CONVEYOR] = 4*0
 SENTINEL_BUILDING_SCORE[map_info._IDX_BARRIER] = 6
 SENTINEL_BUILDING_SCORE[map_info._IDX_SPLITTER] = SENTINEL_BUILDING_SCORE[map_info._IDX_CONVEYOR]
 
@@ -62,7 +62,7 @@ SENTINEL_BUILDING_SCORE[map_info._IDX_SPLITTER] = SENTINEL_BUILDING_SCORE[map_in
 # smaller gain on clustered infra (sentinels already out-damage them there).
 GUNNER_BUILDING_SCORE = [0] * map_info._NUM_ET
 GUNNER_BUILDING_SCORE[map_info._IDX_CORE] = 63 #duplicate value
-GUNNER_BUILDING_SCORE[map_info._IDX_HARVESTER] = 48
+GUNNER_BUILDING_SCORE[map_info._IDX_HARVESTER] = 48*0
 GUNNER_BUILDING_SCORE[map_info._IDX_GUNNER] = 128
 # Measured 57.6% against Champion_v47 as the sole change; keeping it at 100 and
 # instead making placement prefer safe tiles measured 47.0%.
@@ -77,7 +77,7 @@ GUNNER_BUILDING_SCORE[map_info._IDX_GUNNER] = 128
 # 7-damage shots it needs to answer.
 GUNNER_BUILDING_SCORE[map_info._IDX_SENTINEL] = 64
 GUNNER_BUILDING_SCORE[map_info._IDX_LAUNCHER] = 32
-GUNNER_BUILDING_SCORE[map_info._IDX_CONVEYOR] = 16
+GUNNER_BUILDING_SCORE[map_info._IDX_CONVEYOR] = 16*0
 GUNNER_BUILDING_SCORE[map_info._IDX_BARRIER] = 26
 GUNNER_BUILDING_SCORE[map_info._IDX_SPLITTER] = GUNNER_BUILDING_SCORE[map_info._IDX_CONVEYOR]
 
@@ -138,8 +138,8 @@ MIN_INCREASE_PER_TURN = 4
 # (top quartile) is worth the full increase; a 3/4-loaded belt 3/4 of it; etc.
 # Makes turrets prefer cutting the enemy's live supply over idle infrastructure.
 # Values are a starting point -- tune freely.
-TI_SCORE_INCREASE_GUNNER = 32
-TI_SCORE_INCREASE_SENTINEL = 12
+TI_SCORE_INCREASE_GUNNER = 32*0
+TI_SCORE_INCREASE_SENTINEL = 12*0
 
 # Gunner-only knobs. Distance discount: the enemy on the tile directly in front
 # of the gunner (ray-step 0) counts full; every tile further back counts half.
@@ -276,9 +276,9 @@ def _enemy_score_group_masks(enemy_team_bm):
     global _SENTINEL_GROUP_MASKS, _GUNNER_GROUP_MASKS
 
     sv = map_info._struct_version
-    # Load buckets change when titanium moves, which does NOT bump _struct_version,
-    # so they belong in the cache key alongside it.
-    load_key = tuple(map_info.conv_load_buckets)
+    # Load buckets and conv_stuck change when titanium moves, which does NOT bump
+    # _struct_version, so they belong in the cache key alongside it.
+    load_key = (tuple(map_info.conv_load_buckets), map_info.conv_stuck)
     if (_GROUP_MASK_CACHE_VERSION == sv and _GROUP_MASK_CACHE_ENEMY == enemy_team_bm
             and _GROUP_MASK_CACHE_LOAD == load_key):
         return _SENTINEL_GROUP_MASKS, _GUNNER_GROUP_MASKS
@@ -307,7 +307,7 @@ def _enemy_score_group_masks(enemy_team_bm):
     # to the enemy conveyors in that bucket. Added on top of the conveyor's own
     # value, so a live belt scores base + bonus along the ray. Pure bit ops.
     for k in range(4):
-        bm_load = map_info.conv_load_buckets[k] & enemy_team_bm
+        bm_load = map_info.conv_load_buckets[k] & enemy_team_bm & ~map_info.conv_stuck
         if bm_load:
             sentinel_groups.append((_TI_SENT_SCORE_BY_BUCKET[k], _TI_SENT_BITS_BY_BUCKET[k], bm_load))
             gunner_groups.append((_TI_GUN_SCORE_BY_BUCKET[k], _TI_GUN_BITS_BY_BUCKET[k], bm_load))

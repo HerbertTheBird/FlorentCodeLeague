@@ -390,9 +390,11 @@ def _update_ferry_avoid() -> None:
     map_info._bm_avoid_extra = mask
 
 
-def score():
+def score(can_move=True):
     """MAX_SCORE while this builder owes the script ops, then while it has
     barriers to guard, then while it is on its way to the front."""
+    if not can_move:
+        return 0
     global _ferried
     if not opener.verify():
         map_info._bm_avoid_extra = 0
@@ -621,13 +623,15 @@ def _guard():
         log(f"OPENER role {_role} rebuilt barrier at {tile}")
 
 
-def run():
+def run(can_move=True):
     """Advance the program.
 
     Ops that need no turn (a WAIT already satisfied, a GOTO already arrived) fall
     through to the next one in the same turn, so a builder that lands on its
     waypoint starts walking the moment it can rather than a turn later.
     """
+    if not can_move:
+        return
     global _step
     if _prog is None or _step >= len(_prog):
         if _prog is not None and _barriers:

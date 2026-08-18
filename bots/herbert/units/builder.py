@@ -13,15 +13,11 @@ from units.spawn_plan import get_ray_endpoint, INITIAL_EXPLORE_MAX_STEPS, INITIA
 import units.states.explore  as explore
 import units.states.disrupt  as disrupt
 import units.states.harvest  as harvest
-import units.states.harvest_repair as harvest_repair
 import units.states.route    as route
-import units.states.route_repair   as route_repair
 import units.states.heal     as heal
 import units.states.attack   as attack
-import units.states.secure   as secure
 import units.states.chase    as chase
-import units.states.defend   as defend
-import units.states.cut      as cut
+import units.states.chip     as chip
 import units.defense as defense
 
 from log import DRAW_DEBUG, log
@@ -32,7 +28,7 @@ nav: Pathing = None
 
 # Sorted in descending order of max score to allow early break in selection loop
 states = tuple(sorted(
-    [explore, disrupt, harvest, harvest_repair, route, route_repair, heal, attack, secure, chase],
+    [explore, disrupt, harvest, route, heal, attack, chase, chip],
     key=lambda s: s.MAX_SCORE,
     reverse=True
 ))
@@ -241,8 +237,9 @@ def run():
     #         _stay_near_core = True
     map_info.update(recompute=False)
     comms.read()          # absorb every slot's shared tiles/symmetry, broadcast our own
+    map_info.add_comm_allies(comms.ally_positions())   # out-of-vision teammates -> friendly masks
     map_info.recompute_derived()
-    draw_mask(map_info._bm_route_targets, 255, 255, 255)
+    draw_mask(map_info._bm_enemy_bots, 255, 255, 255)
 
     # First run only: decode the opening conveyor plan the core queued in slot 0
     # on the turn it spawned us (read here after comms.read() cached the slot).

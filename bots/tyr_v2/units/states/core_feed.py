@@ -45,7 +45,9 @@ def _feed_specs() -> tuple[tuple[Position, object], ...]:
     return tuple(specs[n] for n in sorted(specs))
 
 
-def score():
+def score(can_move=True):
+    if not can_move:
+        return 0
     global _cached
     _cached = None
     if not units.builder._stay_near_core or not has_op():
@@ -91,7 +93,9 @@ def score():
     return 0
 
 
-def run():
+def run(can_move=True):
+    if not can_move:
+        return
     if _cached is None:
         return
     kind, tile, inward = _cached

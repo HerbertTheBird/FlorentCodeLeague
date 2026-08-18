@@ -20,7 +20,9 @@ def init(c: Controller):
     nav = units.builder.nav
 
 MAX_SCORE = 1
-def score():
+def score(can_move=True):
+    if not can_move:
+        return 0
     return 1
 
 def generate_explore_target():
@@ -97,7 +99,9 @@ def generate_explore_target():
     explore_target = Position(n % w, n // w)
 
 
-def run():
+def run(can_move=True):
+    if not can_move:
+        return
     global explore_target, _explore_target_from_initial
     log("EXPLORE")
     

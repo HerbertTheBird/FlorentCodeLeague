@@ -36,7 +36,9 @@ def _my_claims():
 # paying for themselves. Left at 2, where it only fires with nothing else to do.
 MAX_SCORE = 2
 _cached_claims = 0
-def score():
+def score(can_move=True):
+    if not can_move:
+        return 0
     global _cached_claims
     if units.builder._econ_only:
         _cached_claims = 0
@@ -44,7 +46,9 @@ def score():
     _cached_claims = _my_claims()
     return 2 if _cached_claims else 0
 
-def run():
+def run(can_move=True):
+    if not can_move:
+        return
     log("DISRUPT")
     available = _cached_claims
     if not available:

@@ -367,7 +367,9 @@ def _service_plan(urgent: bool) -> tuple[Position, set[Position], Position] | No
     return best_target, service_tiles, route[1]
 
 
-def score():
+def score(can_move=True):
+    if not can_move:
+        return 0
     global _cached_chase_target, _cached_service_target, _cached_service_tiles
     global _cached_service_step
     global _cached_service_urgent
@@ -541,10 +543,27 @@ def _chase_on_damaged_conv(target) -> bool:
     return bool(en_bit & my_dam_convs)
 
 
-def run():
+def run(can_move=True):
+    if not can_move:
+        return
     log("HEAL")
     if (_cached_service_target is None or not _cached_service_tiles
             or _cached_service_step is None):
+        # Flee-lethal: the normal service path already steps off lethal tiles
+        # via bfs_move, but this in-place fall-through does not. If we are
+        # standing on a tile that kills us this turn, escape to the nearest
+        # safe reachable tile before healing.
+        w = map_info._width
+        my_pos = map_info._my_pos
+        my_n = my_pos.x + my_pos.y * w
+        lethal = map_info.lethal_mask(rc.get_hp())
+        if lethal & (1 << my_n):
+            safe = (map_info._board_mask & ~lethal & ~map_info._bm_blocked
+                    & ~map_info._bm_friendly_bots) & ~(1 << my_n)
+            if safe:
+                route = nav.bfs_move(my_n, safe, map_info.get_avoid(False))
+                if route is not None and route[1] != my_pos:
+                    nav.move(map_info.direction_to(my_pos, route[1]))
         _do_best_heal()
         return
     log("heal: service", "urgent" if _cached_service_urgent else "normal",

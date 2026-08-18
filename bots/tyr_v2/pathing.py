@@ -462,11 +462,22 @@ class Pathing:
         bcost = barrier_cost
         tcost = threat_cost
 
-        avoid &= ~start_mask
+        # HARD would-die block: never route INTO a tile where this unit's HP is
+        # <= the damage it would take there (gunner 7 / sentinel 18, both 25).
+        # lethal_mask is HP-dependent, so a full-HP builder walks through single-
+        # turret fire it would survive, but a low-HP one refuses.
+        die = map_info.lethal_mask(self.rc.get_hp())
+        avoid = (avoid | die) & ~start_mask
         builders_mask = (bm_friendly_bots | bm_enemy_bots) & ~start_mask
         # Our own tile counts as a reachable option so "stay put" can win a tie
-        # against a step (we prefer not moving when a move gets us no closer).
-        can_move_to = (map_info.expand_manhattan(start_mask) & ~avoid & ~builders_mask) | start_mask
+        # against a step (we prefer not moving when a move gets us no closer) --
+        # UNLESS we're standing where we'd die and have somewhere to step, in which
+        # case drop "stay put" so the search must move us off it.
+        movable = map_info.expand_manhattan(start_mask) & ~avoid & ~builders_mask & ~start_mask
+        if (die & start_mask) and movable:
+            can_move_to = movable
+        else:
+            can_move_to = movable | start_mask
 
         my_team_idx = map_info._my_team_idx
         barriers = bm_et[idx_barrier] & bm_team[my_team_idx]
@@ -681,11 +692,18 @@ class Pathing:
             ) & not_avoid
             frontier[(i + 1) % cycle_len] |= new_card
             i += 1
-    def move_adjacent(self, pos: Position, fallback: Position | None = None, **kwargs):
+    def move_adjacent(self, pos: Position, fallback: Position | None = None,
+                      can_move: bool = True, **kwargs):
         """Move to a CARDINAL neighbour of pos. Titan build/destroy/heal reach is
         cardinal-only (dist^2 == 1), so a diagonal neighbour is useless — the
         follow-up action would just fail. Filters by in_bounds, passable, no
         builder bot, and in vision."""
+        # can_move=False: in-place free-action-retry mode. Never step. Return
+        # True ("bail, can't act from here") unless we're already cardinally
+        # adjacent to pos, in which case False ("act now").
+        if not can_move:
+            my = map_info._my_pos
+            return abs(my.x - pos.x) + abs(my.y - pos.y) != 1
         rc = self.rc
         adj = set()
         for d in CARD_DIR:
@@ -707,7 +725,15 @@ class Pathing:
                 adj.add(pos)
         return self.move_to(adj, **kwargs)
 
-    def move_to(self, target: Position | set[Position], avoid_turret: bool = True):
+    def move_to(self, target: Position | set[Position], avoid_turret: bool = True,
+                can_move: bool = True):
+        if not can_move:
+            # In-place mode: never step. "act now" (False) only if we're already
+            # standing on the/a target tile, else "bail" (True).
+            my = map_info._my_pos
+            if isinstance(target, Position):
+                return my != target
+            return my not in target
         log("move to", target)
         if isinstance(target, Position):
             target_set = {target}

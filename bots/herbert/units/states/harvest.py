@@ -13,13 +13,20 @@ from log import log
 rc: Controller = None
 nav: Pathing = None
 
-def _my_claims():
+def _my_claims(repair=False):
     my_pos = map_info._my_pos
     w = map_info._width
     my_mask = 1 << (my_pos.x + my_pos.y * w)
     available = harvestable_ore() & ~payg.too_expensive(
         _cost_map, rc.get_global_resources(), rc.get_current_round()
     )
+    if repair:
+        # Repair-quality: only ore one hop from the accepting network -- adjacent
+        # to a route target (a conveyor whose chain already reaches the core) or
+        # the core itself -- so a harvester built here feeds the network at once.
+        # These claims score at the higher repair tier.
+        valid_route_targets = map_info._bm_route_targets | map_info._bm_my_core_area
+        available &= map_info.expand_manhattan(valid_route_targets)
     if units.builder._stay_near_core:
         available &= units.builder.near_core_mask()
     return pathing.claim_subset(my_mask, map_info._bm_friendly_bots, available, tie_self=False)
@@ -30,61 +37,7 @@ def init(c: Controller):
     nav = units.builder.nav
 
 cant_harvest = 0
-# After this round the opening is considered over and harvest may claim ore
-# inside the core's own vision reach (before it, that ore is left to the core).
-CORE_VISION_OPEN_ROUND = 50
 _cost_map: dict[int, tuple[int, int]] = {}  # tile index -> (min titanium cost, round recorded)
-
-_vision_cache = (None, 0)   # (core Position, vision mask) -- geometry only
-
-
-def _core_vision_mask() -> int:
-    """Tiles the core actually sees. The core is 2x2 and its vision is measured to
-    the NEAREST of its four cells (r^2=36), so from the core's CENTRE the reach is
-    42.5, not 36 -- and on the integer grid that union of four cell-disks is
-    exactly a single r^2=42.5 disk about the centre (verified tile-for-tile vs the
-    engine's is_in_vision). `_my_core` is the top-left corner, so the centre is
-    +(0.5, 0.5). Pure geometry, cached on the core."""
-    global _vision_cache
-    core = map_info._my_core
-    if core is None:
-        return 0
-    if _vision_cache[0] == core:
-        return _vision_cache[1]
-    w, h = map_info._width, map_info._height
-    r2 = 42.5
-    cx, cy = core.x + 0.5, core.y + 0.5
-    vis = 0
-    for y in range(h):
-        dy2 = (y - cy) * (y - cy)
-        if dy2 > r2:
-            continue
-        for x in range(w):
-            if (x - cx) * (x - cx) + dy2 <= r2:
-                vis |= 1 << (x + y * w)
-    _vision_cache = (core, vis)
-    return vis
-
-
-def _core_vision_reach() -> int:
-    """Tiles a cardinal BFS from the core reaches while treating everything
-    outside the core's view (and walls) as impassable -- the ore the core can
-    already see a straight conveyor run to. We keep harvesters off these and leave
-    that ore to the core's own connected network. Recomputed live so it tracks
-    revealed walls; the BFS is cheap (bitset flood over ~a vision disk)."""
-    vis = _core_vision_mask()
-    if not vis:
-        return 0
-    passable = vis & ~map_info._bm_env[map_info._IDX_ENV_WALL]
-    reach = map_info._bm_my_core_area
-    frontier = reach
-    while frontier:
-        nxt = map_info.expand_manhattan(frontier) & passable & ~reach
-        if not nxt:
-            break
-        reach |= nxt
-        frontier = nxt
-    return reach
 
 
 def possible_ore():
@@ -115,19 +68,18 @@ def harvestable_ore():
     # units.builder.draw_mask(ore, 255, 0, 0)
     # units.builder.draw_mask(secured(), 0, 255, 0)
     # units.builder.draw_mask(cant_harvest, 0, 0, 255)
-    result = (ore
-              & ~map_info._bm_et[map_info._IDX_HARVESTER]
-              & ~cant_harvest)
-    # During the opening, leave ore the core can already reach through its own
-    # view to the core's network; harvest only claims ore beyond it. After round
-    # CORE_VISION_OPEN_ROUND the opening is over, so harvest inside core vision too.
-    return result
+    # Any ore we can still act on: not already harvested, not known-unroutable.
+    # Harvest targets ore even inside the core's own vision.
+    return (ore
+            & ~map_info._bm_et[map_info._IDX_HARVESTER]
+            & ~cant_harvest)
 
-def _find_harvest_target():
+def _find_harvest_target(repair=False):
     """First reachable+affordable ore as (ore, path, ore_bit), else None. Done in
-    score() so harvest isn't selected when nothing can be routed/afforded."""
+    score() so harvest isn't selected when nothing can be routed/afforded. With
+    repair=True, only ore one hop from the network is considered (higher tier)."""
     global cant_harvest
-    available = _my_claims()
+    available = _my_claims(repair)
     if not available:
         return None
     w = map_info._width
@@ -154,11 +106,22 @@ def _find_harvest_target():
     return None
 
 
-MAX_SCORE = 4
+# Folds in the former harvest_repair state: a repair-quality target (ore one hop
+# from the network) scores REPAIR_SCORE, plain harvestable ore scores NORMAL_SCORE.
+# MAX_SCORE is the higher of the two so the selection loop's early-break is correct.
+NORMAL_SCORE = 4
+REPAIR_SCORE = 7
+MAX_SCORE = 7
 _cached_target = None
 def score(can_move=True):
     global _cached_target
-    _cached_target = _find_harvest_target()
+    # Prefer a repair-quality target -- ore one hop from the accepting network --
+    # which scores at the higher repair tier. Otherwise fall back to any
+    # harvestable ore at the plain tier.
+    _cached_target = _find_harvest_target(repair=True)
+    repair = _cached_target is not None
+    if _cached_target is None:
+        _cached_target = _find_harvest_target(repair=False)
     if _cached_target is None:
         return 0
     if not can_move:
@@ -168,7 +131,7 @@ def score(can_move=True):
         if abs(best_ore.x - my.x) + abs(best_ore.y - my.y) != 1:
             _cached_target = None
             return 0
-    return MAX_SCORE
+    return REPAIR_SCORE if repair else NORMAL_SCORE
 
 
 def run(can_move=True):

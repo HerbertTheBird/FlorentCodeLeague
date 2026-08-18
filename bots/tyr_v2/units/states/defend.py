@@ -376,7 +376,9 @@ def _claim_sentry() -> Position | None:
     return tile
 
 
-def score():
+def score(can_move=True):
+    if not can_move:
+        return 0
     global _cached_block, _cached_enemy, _cached_sentry, _cached_holding, _cached_siege
     global _cached_trap, _birth_round, _am_defender, _last_claim_round
     _cached_block = _cached_enemy = _cached_sentry = _cached_siege = _cached_trap = None
@@ -583,7 +585,9 @@ def _build_sentry() -> None:
     nav.move_adjacent(tile)
 
 
-def run():
+def run(can_move=True):
+    if not can_move:
+        return
     if _cached_siege is not None:
         _run_siege()
     elif _cached_block is not None:

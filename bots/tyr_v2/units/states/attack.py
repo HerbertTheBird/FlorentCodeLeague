@@ -123,6 +123,11 @@ SCORE_THRESHOLD_FACTOR = 0.25
 MIN_ATTACK_SCORE = 28
 THREAT_PENALTY = 4
 NON_GOOD_TILE_BUFF = 6
+# Flat bonus added to a turret placement tile that sits in the ring immediately
+# around the enemy core (Chebyshev-1), on top of whatever it hits -- pull siege
+# turrets right up against their core. Only applied while the core is actually a
+# target (i.e. the siege gate is open); see the bakes in the score computes.
+ADJ_ENEMY_CORE_SCORE = 24
 
 # Gunner-only knobs. Distance discount: enemy at ray-step k counts as
 # round(score * 0.9^k); k=0 is the tile directly in front of the gunner.
@@ -203,6 +208,7 @@ _SENTINEL_SCORE_GROUPS = _build_score_groups(SENTINEL_BUILDING_SCORE)
 _GUNNER_SCORE_GROUPS = _build_gunner_score_groups(GUNNER_BUILDING_SCORE)
 
 _THREAT_PENALTY_BITS = _bits_of(THREAT_PENALTY)
+_ADJ_ENEMY_CORE_BITS = _bits_of(ADJ_ENEMY_CORE_SCORE)
 _SENT_CORE_BITS = _bits_of(SENTINEL_BUILDING_SCORE[map_info._IDX_CORE])
 _GUN_CORE_BITS_BY_STEP = _step_bits_tuple(GUNNER_BUILDING_SCORE[map_info._IDX_CORE])
 _HARVESTER_CONVEYOR_SENTINEL_BITS = _bits_of(_HARVESTER_CONVEYOR_SENTINEL_BONUS)
@@ -509,6 +515,13 @@ def _compute_sentinel_dir_scores(enemy_team_bm, threat, sentinel_masks,
             baked = baked_base & sentinel_masks[d]
             if baked:
                 add_bits_to_planes(planes, threat_penalty_bits, baked)
+
+    if sent_core_bits and _ADJ_ENEMY_CORE_BITS and core_mask:
+        adj_core = (map_info.expand_chebyshev(core_mask) & ~core_mask) & board_mask
+        for d, planes in enumerate(all_planes):
+            baked = adj_core & sentinel_masks[d]
+            if baked:
+                add_bits_to_planes(planes, _ADJ_ENEMY_CORE_BITS, baked)
     return all_planes
 
 
@@ -684,6 +697,13 @@ def _compute_gunner_dir_scores(enemy_team_bm, threat, gunner_masks,
             baked = baked_base & gunner_masks[d]
             if baked:
                 add_bits_to_planes(planes, threat_penalty_bits, baked)
+
+    if gun_core_bits_by_step[0] and _ADJ_ENEMY_CORE_BITS and core_mask:
+        adj_core = (map_info.expand_chebyshev(core_mask) & ~core_mask) & board_mask
+        for d, planes in enumerate(all_planes):
+            baked = adj_core & gunner_masks[d]
+            if baked:
+                add_bits_to_planes(planes, _ADJ_ENEMY_CORE_BITS, baked)
     return all_planes
 
 
@@ -774,6 +794,11 @@ def _placement_candidates():
     all_bots = (map_info._bm_friendly_bots | map_info._bm_enemy_bots) & ~my_bit
     candidates &= ~all_bots
     candidates &= ~cant_attack
+    # A gunner's ray is absorbed by the first building it hits, so a solid turret
+    # built on any tile the ray passes through blocks that gunner's shot at
+    # whatever is behind it. Exclude our own gunners' ray tiles (gunner-only;
+    # sentinels aren't blockable so they're not in this mask).
+    candidates &= ~map_info._bm_my_gunner_claims
     if not candidates:
         return _EMPTY_CANDIDATE_MASKS, _EMPTY_CANDIDATE_MASKS
 
@@ -1034,7 +1059,7 @@ MAX_SCORE = 6
 SIEGE_OPEN_ROUND = 150
 SIEGE_MIN_HARVESTERS = 2
 
-def score():
+def score(can_move=True):
     global _SENT_CORE_BITS, _GUN_CORE_BITS_BY_STEP
     if units.builder._econ_only:
         return 0
@@ -1054,6 +1079,11 @@ def score():
     _GUN_CORE_BITS_BY_STEP = _step_bits_tuple(GUNNER_BUILDING_SCORE[core])
     global _cached_claims
     _cached_claims = _my_claims()
+    if not can_move:
+        # In-place retry: only placement tiles we can build on from right here
+        # (a cardinal neighbour) count -- anything else would need a move.
+        my_bit = 1 << (map_info._my_pos.x + map_info._my_pos.y * map_info._width)
+        _cached_claims &= map_info.expand_manhattan(my_bit) & ~my_bit
     return MAX_SCORE if _cached_claims else 0
 
 
@@ -1261,12 +1291,72 @@ def _try_launcher_lockdown(target: Position) -> bool:
     return False
 
 
-def run():
+MIN_INCREASE_PER_TURN = 4
+
+
+def _best_placement_score(mask: int) -> int:
+    """Best turret score over the candidate tiles in `mask` (0 if empty)."""
+    w = map_info._width
+    best = 0
+    m = mask
+    while m:
+        lsb = m & -m
+        m ^= lsb
+        n = lsb.bit_length() - 1
+        _, _, s = get_best_direction(Position(n % w, n // w))
+        if s > best:
+            best = s
+    return best
+
+
+def _lookahead_step(candidates: int):
+    """One-tile look-ahead: for every cardinal direction we could walk, look at
+    the tiles adjacent to that walk spot (where we could place a turret NEXT
+    turn). If the best such placement beats the best we could place from HERE by
+    at least MIN_INCREASE_PER_TURN, return that walk spot to step onto; else
+    None. Only safe (non-lethal), passable, unoccupied neighbours count."""
+    my = map_info._my_pos
+    w, h = map_info._width, map_info._height
+    my_bit = 1 << (my.x + my.y * w)
+    now_best = _best_placement_score(
+        candidates & (map_info.expand_manhattan(my_bit) & ~my_bit))
+    threshold = now_best + MIN_INCREASE_PER_TURN
+    passable = map_info._board_mask & ~map_info._bm_blocked
+    blocked = (((map_info._bm_friendly_bots | map_info._bm_enemy_bots) & ~my_bit)
+               | map_info.lethal_mask(rc.get_hp()))
+    best_step = None
+    best_score = -1
+    for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+        nx, ny = my.x + dx, my.y + dy
+        if not (0 <= nx < w and 0 <= ny < h):
+            continue
+        nb = 1 << (nx + ny * w)
+        if not (passable & nb) or (blocked & nb):
+            continue                                   # can't stand there
+        s = _best_placement_score(
+            candidates & (map_info.expand_manhattan(nb) & ~nb))
+        if s >= threshold and s > best_score:
+            best_score = s
+            best_step = Position(nx, ny)
+    return best_step
+
+
+def run(can_move=True):
     global cant_attack
     log("ATTACK")
     candidates = _cached_claims
     if not candidates:
         return
+
+    # One-tile look-ahead: if stepping to a neighbour lets us place a turret next
+    # turn scoring MIN_INCREASE_PER_TURN better than anything we could place from
+    # here, take the step instead of building now.
+    if can_move:
+        step = _lookahead_step(candidates)
+        if step is not None:
+            log(f"Attack: stepping to {step} for a stronger turret next turn")
+            nav.move_to(step)
+            return
 
     # If a cardinally-adjacent empty tile is a good build spot, build there now.
     # (We can't move and build the same turn, so this only fires when already in
@@ -1281,4 +1371,4 @@ def run():
         cant_attack |= candidates
         return
     log(f"Attack: moving toward {best}")
-    nav.move_adjacent(best)
+    nav.move_adjacent(best, can_move=can_move)

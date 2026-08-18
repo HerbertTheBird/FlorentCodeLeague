@@ -116,7 +116,9 @@ def _candidate_tiers(core: int) -> tuple:
     return tuple(tiers)
 
 
-def score():
+def score(can_move=True):
+    if not can_move:
+        return 0
     global _cached_tiers, _finished
     _cached_tiers = ()
     if not am_rusher or _finished:
@@ -153,7 +155,9 @@ def _engine_confirms_ray(site: Position, facing, core: int) -> bool:
     return False
 
 
-def run():
+def run(can_move=True):
+    if not can_move:
+        return
     global _finished
     if not _cached_tiers:
         return

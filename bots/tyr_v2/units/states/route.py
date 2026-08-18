@@ -141,15 +141,19 @@ def _my_claims():
 _cached_claims = 0
 
 MAX_SCORE = 11
-def score():
+def score(can_move=True):
     global _cached_claims
+    if not can_move:
+        return 0
     units.builder.draw_mask(map_info._bm_dead_end, 0, 0, 255)
     _cached_claims = _my_claims()
     return MAX_SCORE if _cached_claims else 0
 
-def run():
+def run(can_move=True):
     global unpathable
     log("ROUTE")
+    if not can_move:
+        return
     candidates = _cached_claims
     if not candidates:
         log("no candidates?")

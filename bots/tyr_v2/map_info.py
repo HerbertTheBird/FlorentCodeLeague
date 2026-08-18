@@ -219,6 +219,8 @@ _bm_dead_end: int = 0           # possible places to route from, defined by the 
 _bm_my_gunner_claims: int = 0     # tiles already covered by one of my gunners' current ray (update only in update)
 _bm_conv_by_dir: list[int] = [0] * 8  # per facing: CONVEYOR tiles with that direction
 _bm_enemy_turret_threat: int = 0 # tiles any enemy turret (sentinel/gunner) can shoot (update only in update)
+_bm_enemy_gunner_threat: int = 0   # tiles an enemy GUNNER can shoot (GUNNER_DAMAGE each)
+_bm_enemy_sentinel_threat: int = 0 # tiles an enemy SENTINEL can shoot (SENTINEL_DAMAGE each)
 # Extra tiles this unit alone wants to stay off, ORed into builder movement.
 # Set per turn by whoever cares and cleared by them; nothing here interprets it.
 # Currently used by units/states/opening.py to keep builders that are not going
@@ -411,7 +413,8 @@ def _compute_enemy_turret_threat() -> int:
     w = _width
     h = _height
     enemy_idx = 1 - _my_team_idx
-    threat = 0
+    sentinel_threat = 0
+    gunner_threat = 0
     bm_team_enemy = _bm_team[enemy_idx]
 
     for turret_idx, offsets_table in (
@@ -428,9 +431,9 @@ def _compute_enemy_turret_threat() -> int:
                 shift_mask = _turret_shift_masks.get((dx, dy))
                 offset = dx + dy * w
                 if offset > 0:
-                    threat |= (dm & shift_mask) << offset
+                    sentinel_threat |= (dm & shift_mask) << offset
                 else:
-                    threat |= (dm & shift_mask) >> (-offset)
+                    sentinel_threat |= (dm & shift_mask) >> (-offset)
 
     gunners = _bm_et[_IDX_GUNNER] & bm_team_enemy
     if gunners:
@@ -452,15 +455,35 @@ def _compute_enemy_turret_threat() -> int:
                     dm = ((dm & shift_mask) >> (-offset)) & not_walls
                 # Empty and conveyor tiles are threatened (a builder can stand
                 # there); a non-conveyor building isn't a valid builder position.
-                threat |= dm & ~blocked
+                gunner_threat |= dm & ~blocked
                 # The ray continues only through EMPTY tiles -- it is absorbed at
                 # any conveyor (builder/conveyor takes the shot) or building, so it
                 # cannot shoot past the first occupied tile.
                 dm &= ~blocked & ~convs
 
     _turret_threat_cache_version = _struct_version
-    _turret_threat_cache = threat
+    _turret_threat_cache = (gunner_threat, sentinel_threat)
     return _turret_threat_cache
+
+
+_GUNNER_DAMAGE = GameConstants.GUNNER_DAMAGE       # 7
+_SENTINEL_DAMAGE = GameConstants.SENTINEL_DAMAGE   # 18
+
+
+def lethal_mask(hp: int) -> int:
+    """Tiles where a unit with `hp` HP would DIE to one turn of enemy turret fire:
+    GUNNER_DAMAGE per covering gunner, SENTINEL_DAMAGE per sentinel (a tile covered
+    by one of each is their sum). Assumes at most one turret of each type covers a
+    tile (the threat masks are boolean)."""
+    gun = _bm_enemy_gunner_threat
+    sen = _bm_enemy_sentinel_threat
+    if hp <= _GUNNER_DAMAGE:
+        return gun | sen                  # any single turret kills
+    if hp <= _SENTINEL_DAMAGE:
+        return sen                        # a sentinel kills; a lone gunner (7) doesn't
+    if hp <= _GUNNER_DAMAGE + _SENTINEL_DAMAGE:
+        return gun & sen                  # only a gunner+sentinel overlap kills
+    return 0                              # survives any one gunner + one sentinel
 
 
 _my_gunner_claims_cache_version: int = -1
@@ -1038,7 +1061,7 @@ def init(c: Controller):
 
     _struct_version = 0
     _turret_threat_cache_version = -1
-    _turret_threat_cache = 0
+    _turret_threat_cache = (0, 0)
     _my_gunner_claims_cache_version = -1
     _my_gunner_claims_cache = 0
     _conv_by_dir_cache_version = -1
@@ -1462,7 +1485,7 @@ _recompute_visible_cache_key: tuple | None = None
 def _recompute_derived_structural() -> None:
     global _bm_blocked, _bm_conveyors, _bm_conveyor_targets
     global _bm_enemy_launch_adj
-    global _bm_enemy_turret_threat
+    global _bm_enemy_turret_threat, _bm_enemy_gunner_threat, _bm_enemy_sentinel_threat
     global _bm_my_gunner_claims, _bm_conv_by_dir
     global _bm_passable_FFF
     global _recompute_structural_cache_version
@@ -1530,7 +1553,8 @@ def _recompute_derived_structural() -> None:
                 _bm_enemy_launch_adj |= 1 << (nx + ny * width)
         mask ^= lsb
 
-    _bm_enemy_turret_threat = _compute_enemy_turret_threat()
+    _bm_enemy_gunner_threat, _bm_enemy_sentinel_threat = _compute_enemy_turret_threat()
+    _bm_enemy_turret_threat = _bm_enemy_gunner_threat | _bm_enemy_sentinel_threat
     _bm_my_gunner_claims = _compute_my_gunner_claims()
     _bm_conv_by_dir = _compute_conv_by_dir()
     _bm_passable_FFF = _board_mask & ~(_bm_blocked | _bm_enemy_launch_adj)

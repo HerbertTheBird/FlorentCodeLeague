@@ -272,7 +272,9 @@ def _open_enemy_line_ends() -> int:
             & ~map_info._bm_enemy_turret_threat)
 
 
-def score():
+def score(can_move=True):
+    if not can_move:
+        return 0
     global _cached_target, _cached_kind, _pending_seal, _pending_seal_until
     _cached_target = None
     _cached_kind = ""
@@ -420,7 +422,9 @@ def score():
     return 0
 
 
-def run():
+def run(can_move=True):
+    if not can_move:
+        return
     global _blocked_until, _pending_seal, _pending_seal_until
     target = _cached_target
     my_pos = map_info._my_pos
