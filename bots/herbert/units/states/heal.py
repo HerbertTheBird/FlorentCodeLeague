@@ -18,10 +18,9 @@ and a builder attack does 2 damage, so the building survives iff
     current_hp > 2 * attacks
 
 If my_dist <= enemy_dist we win regardless of HP (0 hits land first). Buildings we
-cannot save in time are dropped. A full-HP conveyor we are already standing next
-to that an enemy is ALSO next to counts as a target too (guard it -- heal it back
-up as they chip it). Among the survivors we pick: closest, then lowest HP, then
-nearest our core by Manhattan.
+cannot save in time are dropped. Only DAMAGED buildings are targets -- a full-HP
+building an enemy stands beside is not one. Among the survivors we pick: closest,
+then lowest HP, then nearest our core by Manhattan.
 """
 import map_info
 import pathing
@@ -187,22 +186,11 @@ def _find_target():
     # closest to, so several builders don't all converge on one building.
     claimed = pathing.claim_subset(my_bit, map_info._bm_friendly_bots, damaged,
                                    tie_self=True)
-    # A full-HP conveyor we already stand beside that an enemy also stands
-    # beside. Only worth guarding if that enemy has no damaged building of ours
-    # adjacent -- if it does, it will chip THAT (and _do_best_heal covers the
-    # damaged one), so a full-HP tile beside such an enemy is not a target.
-    # (Uses any-damage here, so we don't guard a full-HP tile beside an enemy
-    # that already has even a lightly-dented building to keep hitting.) Guard is
-    # defined by MY position, so it is inherently local -- not Voronoi-claimed.
-    guard = 0
-    if enemy_bots:
-        my_convs = map_info._bm_conveyors & my
-        full_convs = my_convs & ~map_info._bm_damaged
-        free_enemies = enemy_bots & ~map_info.manhattan(damaged_any)
-        guard = (full_convs & map_info.manhattan(my_bit)
-                 & map_info.manhattan(free_enemies))
-
-    candidates = (claimed | guard) & map_info.expand_manhattan(my_bit, MAX_HEAL_DIST)
+    # Only DAMAGED buildings are heal targets. A full-HP building an enemy stands
+    # beside is NOT a target: there is nothing to heal until it actually takes damage,
+    # at which point it enters `damaged` and is claimed normally. (We used to "guard"
+    # a full-HP conveyor beside an enemy, healing it as it got chipped; that's dropped.)
+    candidates = claimed & map_info.expand_manhattan(my_bit, MAX_HEAL_DIST)
     if not candidates:
         return None
 

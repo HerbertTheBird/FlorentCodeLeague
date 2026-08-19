@@ -53,6 +53,15 @@ def init(c: Controller):
 
 
 
+def _enemy_bot_cardinally_adjacent(pos) -> bool:
+    """True if an enemy builder bot sits on a tile cardinally adjacent to `pos`. Such
+    a bot repairs a barrier there faster than a gunner can break it, so the barrier is
+    effectively unkillable."""
+    bit = 1 << (pos.x + pos.y * map_info._width)
+    neighbours = map_info.expand_manhattan(bit) & ~bit
+    return bool(neighbours & map_info._bm_enemy_bots)
+
+
 def _scan_ray(direction, attackable, allow_builder_bots: bool,
               bot_must_be_on_my_conveyor: bool = False):
     """Walk forward from my_pos in `direction`. The first non-empty tile is the
@@ -118,6 +127,11 @@ def _scan_ray(direction, attackable, allow_builder_bots: bool,
         # Building only
         bid_etype = rc.get_entity_type(bid)
         if rc.get_team(bid) == my_team:
+            return None
+        # A barrier with an enemy builder bot cardinally adjacent is repaired faster
+        # than a gunner can break it -- unkillable -- and it blocks the rest of the
+        # ray, so treat this direction as having nothing to shoot.
+        if bid_etype == EntityType.BARRIER and _enemy_bot_cardinally_adjacent(cur):
             return None
         return bid_etype, fire_at
 

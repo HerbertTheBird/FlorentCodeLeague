@@ -157,7 +157,7 @@ _width = _height = 0
 # Holding it unconditionally (rather than only while a threat is live) measured
 # better on both opponents tested — an on-demand version cost ~10 points against
 # Khaos and gained nothing against Heimdall v3 — so this stays simple.
-TI_RESERVE_CAP = 30
+TI_RESERVE_CAP = 10
 # Tried and rejected: scaling the reserve to current titanium
 # (min(cap, resources/3)) so it could never freeze construction when poor. The
 # reasoning looked sound — ladder replays show antler games where we sit at

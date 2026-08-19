@@ -654,16 +654,73 @@ def wins_barrier(filt, cardinal_codes, dmask, halfhp):
     return bool(bits[idx >> 3] & (1 << (idx & 7)))
 
 
+# ---- pickle-free serialization for the chip tables --------------------------
+# The competition sandbox runs the pure-Python unpickler with `memoryview` removed
+# from builtins, so pickle.load raises "name 'memoryview' is not defined" for these
+# files regardless of protocol. Both tables contain only {dict, tuple, list, int,
+# bytes}, so we hand-roll a tiny tagged binary format that touches none of that --
+# just int.to_bytes/from_bytes and byte slicing. Tags: 0 int (len-prefixed, signed),
+# 1 bytes, 2 tuple, 3 dict, 4 list; 2/3/4 are 4-byte-count-prefixed.
+def _enc(o, out):
+    if isinstance(o, int):                       # NB: no bool in these tables
+        b = o.to_bytes((o.bit_length() + 8) // 8 or 1, "little", signed=True)
+        out.append(0); out.append(len(b)); out += b
+    elif isinstance(o, (bytes, bytearray)):
+        out.append(1); out += len(o).to_bytes(4, "little"); out += o
+    elif isinstance(o, tuple):
+        out.append(2); out += len(o).to_bytes(4, "little")
+        for e in o:
+            _enc(e, out)
+    elif isinstance(o, dict):
+        out.append(3); out += len(o).to_bytes(4, "little")
+        for k, v in o.items():
+            _enc(k, out); _enc(v, out)
+    elif isinstance(o, list):
+        out.append(4); out += len(o).to_bytes(4, "little")
+        for e in o:
+            _enc(e, out)
+    else:
+        raise TypeError(f"chip table has unsupported type {type(o).__name__}")
+
+
+def _dec(buf, i):
+    tag = buf[i]; i += 1
+    if tag == 0:
+        n = buf[i]; i += 1
+        return int.from_bytes(buf[i:i + n], "little", signed=True), i + n
+    if tag == 1:
+        n = int.from_bytes(buf[i:i + 4], "little"); i += 4
+        return bytes(buf[i:i + n]), i + n
+    if tag in (2, 4):
+        n = int.from_bytes(buf[i:i + 4], "little"); i += 4
+        out = []
+        for _ in range(n):
+            e, i = _dec(buf, i)
+            out.append(e)
+        return (tuple(out) if tag == 2 else out), i
+    if tag == 3:
+        n = int.from_bytes(buf[i:i + 4], "little"); i += 4
+        d = {}
+        for _ in range(n):
+            k, i = _dec(buf, i)
+            v, i = _dec(buf, i)
+            d[k] = v
+        return d, i
+    raise ValueError(f"bad chip-table tag {tag} at offset {i - 1}")
+
+
 def save_filter(filt, path):
-    import pickle
+    out = bytearray()
+    _enc(filt, out)
     with open(path, "wb") as f:
-        pickle.dump(filt, f, protocol=pickle.HIGHEST_PROTOCOL)
+        f.write(bytes(out))
 
 
 def load_filter(path):
-    import pickle
     with open(path, "rb") as f:
-        return pickle.load(f)
+        buf = f.read()
+    obj, _ = _dec(buf, 0)
+    return obj
 
 
 def wins(filt, neighbour_codes, neighbour_halfhp):

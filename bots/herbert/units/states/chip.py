@@ -5,6 +5,18 @@ from fcode import *
 
 from log import log
 
+# chip_precompute (barrier logic), chip_solve (live solver), and chip_barrier_data
+# (the offline barrier win-table, embedded as a Python dict literal). Imported at
+# MODULE scope, NOT lazily inside functions, so the submission bundler -- which ships
+# the bot by following top-level imports -- actually includes them ("No module named
+# 'chip_precompute'" was a lazy import it couldn't see). The sandbox blocks open() and
+# file I/O, so the table can't be a .pkl loaded from disk; it ships as a dict literal
+# that the compiler builds at import -- no open, no pickle, no memoryview, no decode.
+import chip_precompute
+import chip_solve
+import chip_barrier_data
+import chip_bestmove_data
+
 rc: Controller = None
 nav: Pathing = None
 
@@ -33,35 +45,19 @@ _DIAG = [(1, 1), (-1, 1), (1, -1), (-1, -1)]        # == chip_precompute.DIAGONA
 N_BARRIER = 2
 _VIS_CAP = 18             # BFS cap for the healer-distance field
 _REGION_CAP = 80         # max defense-zone tiles we'll solve (keeps it within ~10ms)
-_CLAIM_RADIUS = 5        # BFS moves within which a lower-id teammate owns the chip spot
+_CLAIM_RADIUS = 5        # BFS moves within which a parked (not-moving) teammate owns the chip spot
 
-_BFILTER = None
-_BESTMOVE = None
 _cached_valid = 0
 _cached_T = None                     # the winning tile score() validated as reachable
 _plans = {}                          # tile index -> [barrier positions to place]
 MAX_SCORE = 6
 
-
-def _load_bfilter():
-    global _BFILTER
-    if _BFILTER is None:
-        import os
-        import chip_precompute
-        _BFILTER = chip_precompute.load_filter(
-            os.path.join(os.path.dirname(chip_precompute.__file__),
-                         "chip_barrier_filter.pkl"))
-    return _BFILTER
-
-
-def _load_bestmove():
-    global _BESTMOVE
-    if _BESTMOVE is None:
-        import os
-        import chip_precompute
-        _BESTMOVE = chip_precompute.load_filter(
-            os.path.join(os.path.dirname(chip_precompute.__file__), "chip_bestmove.pkl"))
-    return _BESTMOVE
+import zlib
+# Barrier win-table (codec bytes) and best-move table (zlib codec bytes), decoded at
+# import. No file I/O (open blocked), no pickle, no memoryview -- just zlib.decompress
+# (C-level) and the plain-int codec.
+_BFILTER = chip_precompute._dec(zlib.decompress(chip_barrier_data.ZDATA), 0)[0]
+_BESTMOVE = chip_precompute._dec(zlib.decompress(chip_bestmove_data.ZDATA), 0)[0]
 
 
 # ---- shared terrain + the ONE definition of "chippable" ----------------------
@@ -164,9 +160,8 @@ def _barrier_plan(codes, base_dmask, halfhp, barrierable, ctx, max_barriers=N_BA
     barriers). max_barriers caps the search at what the caller can afford this turn, so
     chip never certifies a stand tile whose plan it can't pay for (which would strand
     the builder adjacent to a barrier it can never place)."""
-    import chip_precompute as CP
     filt = ctx["filt"]
-    if CP.wins_barrier(filt, codes, base_dmask, halfhp):
+    if chip_precompute.wins_barrier(filt, codes, base_dmask, halfhp):
         return []
     order = sorted(barrierable, key=lambda b: 0 if b[0] == "card" else 1)
 
@@ -185,7 +180,7 @@ def _barrier_plan(codes, base_dmask, halfhp, barrierable, ctx, max_barriers=N_BA
         import itertools
         for sel in itertools.combinations(order, k):
             c, dm = apply(sel)
-            if CP.wins_barrier(filt, c, dm, halfhp):
+            if chip_precompute.wins_barrier(filt, c, dm, halfhp):
                 return list(sel)
     return None
 
@@ -265,7 +260,6 @@ def _table_best_target(pos, ctx, codes, dmask, targets):
     """O(1) optimal-winning target from the precomputed best-move table -- for the
     heavy (3-4 target) cases the live solver skips, when the healer sits in the local
     cluster. Position or None."""
-    import chip_precompute as CP
     if not targets:
         return None
     allspots = 0
@@ -278,10 +272,10 @@ def _table_best_target(pos, ctx, codes, dmask, targets):
         return None
     w = ctx["w"]
     off = (b0 % w - pos.x, b0 // w - pos.y)
-    if off not in CP.ALL_CELLS:            # healer not in the cluster -> table N/A
+    if off not in chip_precompute.ALL_CELLS:            # healer not in the cluster -> table N/A
         return None
     hp = [t["halfhp"] for t in targets]
-    mi = CP.bestmove_lookup(_load_bestmove(), codes, dmask, hp, off)
+    mi = chip_precompute.bestmove_lookup(_BESTMOVE, codes, dmask, hp, off)
     if mi is None:
         return None
     return targets[mi]["pos"]
@@ -292,7 +286,6 @@ def _solve_best_target(ctx, targets):
     fewest turns against the single closest healer. None if unsolvable within the
     region/state caps (then the far-healer free-kill path already covered the fast
     cases). Operates on the real board geometry (not the cluster abstraction)."""
-    import chip_solve
     if not targets:
         return None
     w, h, passable = ctx["w"], ctx["h"], ctx["passable"]
@@ -326,13 +319,16 @@ def _solve_best_target(ctx, targets):
         return None
     idx = {n: i for i, n in enumerate(tiles)}
     nt = len(tiles)
-    # Upfront state-count estimate: prod(hp ranges) * tiles * 2. Bail (before doing
-    # any work) when it's too large to solve within ~10ms -- this is the 3-4 target /
-    # high-HP tail; the free-kill path and the barrier certificate still apply.
+    # Upfront state-count estimate: prod(hp ranges) * tiles * 2. Bail (before doing any
+    # work) when it's too large to solve well inside the 10ms turn budget. Measured:
+    # est ~= 20000 took ~12.6ms and est ~= 8000 ~7ms (both risk the 10ms turn budget once
+    # the rest of the builder's turn is added), so cap at 5000 (~4.5ms). Bailed cases are
+    # handled by the precomputed table (tried first) or the lowest-HP fallback -- and
+    # free-kill already covered the fast wins.
     est = nt * 2
     for mh in maxhalf:
         est *= (mh + 1)
-    if est > 20000:
+    if est > 5000:
         return None
     adj = [[] for _ in range(nt)]
     heal_by_tile = [[] for _ in range(nt)]
@@ -358,19 +354,13 @@ def _solve_best_target(ctx, targets):
 
 
 # ---- valid targets -----------------------------------------------------------
-def _lower_id_claim_region(passable):
-    """Tiles within _CLAIM_RADIUS BFS moves (over passable) of any friendly builder
-    bot whose id is lower than ours. Those teammates get priority on the chip spots
-    near them, so we invalidate stand tiles inside this region and look elsewhere --
-    keeping two builders from converging on the same target."""
-    my_id = rc.get_id()
-    my_team = map_info._my_team_idx
-    bot_team = map_info._bot_team
-    seed = 0
-    for uid, n in map_info._bot_pos.items():
-        if uid < my_id and bot_team.get(uid) == my_team:
-            seed |= 1 << n
-    seed &= map_info._bm_friendly_bots        # only teammates actually present now
+def _stationary_claim_region(passable):
+    """Tiles within _CLAIM_RADIUS BFS moves (over passable) of a friendly builder bot
+    that is NOT moving. A parked teammate is presumably already working the chip spot
+    beside it, so we invalidate stand tiles inside this region and look elsewhere --
+    keeping two builders from converging on the same target. (_bm_friendly_stationary
+    already excludes us, and persists a teammate through it leaving our vision.)"""
+    seed = map_info._bm_friendly_stationary
     if not seed:
         return 0
     region = seed
@@ -384,15 +374,15 @@ def _lower_id_claim_region(passable):
 def valid_targets() -> int:
     global _plans
     ctx = _terrain()
-    ctx["filt"] = _load_bfilter()
+    ctx["filt"] = _BFILTER
     units.builder.draw_mask(map_info.conv_stuck, 255, 0, 0)
     w = ctx["w"]
     possible = (map_info.manhattan(ctx["chippable"])
                 & ~map_info._bm_enemy_turret_threat & ~map_info._bm_enemy_launch_adj
                 & ~ctx["blockers"] & ~map_info._bm_enemy_bots)
-    # Cede spots a lower-id teammate is already working: drop any stand tile within
-    # _CLAIM_RADIUS BFS moves of a friendly builder whose id is lower than ours.
-    possible &= ~_lower_id_claim_region(ctx["passable"])
+    # Cede spots a parked teammate is already working: drop any stand tile within
+    # _CLAIM_RADIUS BFS moves of a friendly builder that is not moving.
+    possible &= ~_stationary_claim_region(ctx["passable"])
     _plans = {}
     if not possible:
         return 0
@@ -511,9 +501,13 @@ def run(can_move=True):
     reached = _healer_field(ctx)
     tgt = _free_kill_target(reached, targets)                 # 1. far healer: O(1)
     if tgt is None:
-        tgt = _solve_best_target(ctx, targets)                # 2. exact live solve
+        # Precomputed table FIRST: it's O(1) and already covers 1-4 targets whenever the
+        # healer sits in the local cluster (the common case). Only fall to the exact live
+        # solver when the healer is outside the cluster, where the table doesn't apply --
+        # this keeps chip off the ~6ms live solve on nearly every turn.
+        tgt = _table_best_target(my, ctx, codes, dmask, targets)  # 2. precomputed table: O(1)
     if tgt is None:
-        tgt = _table_best_target(my, ctx, codes, dmask, targets)  # 3. precomputed table
+        tgt = _solve_best_target(ctx, targets)                # 3. exact live solve (healer far)
     if tgt is None:
         tgt = _lowest_hp_target(targets)                      # 4. last resort
     if tgt is not None:
