@@ -274,13 +274,27 @@ def select_best(candidates, priority_sets, nav, one_shot_hp: int,
 
 def scrap_if_idle(rc) -> bool:
     """Self-destruct a turret that has become dead weight: the caller has nothing
-    to shoot this turn, and the turret sees no enemy bots and at most 2 enemy
-    buildings. Such a turret's targets are gone, so recycle it. Returns True if it
-    self-destructed.
+    to shoot this turn and we are tracking no enemy bots anywhere. Returns True
+    if it self-destructed. `rc.self_destruct()` refunds the turret's BUILD SCALE
+    contribution (+10% gunner/launcher, +20% sentinel) but no titanium.
 
-    'Sees' means the turret's current vision: enemy bots via map_info tracking,
-    enemy buildings via the controller's nearby-building list (distinct entities,
-    so a 2x2 enemy core counts once)."""
+    NOTE the guard is weaker than it looks, and deliberately left that way:
+      * `map_info._bm_enemy_bots` is the team's REMEMBERED GLOBAL enemy-bot set,
+        not this turret's own vision.
+      * Enemy BUILDINGS are not considered at all. An earlier version of this
+        docstring promised "at most 2 enemy buildings in sight"; that check never
+        existed, and measurement says it is not worth adding -- we scrap with 3,
+        5, 6 and 10 enemy buildings standing and it costs nothing.
+
+    Measured (24-game screens vs the shipped bot, then an 86-game panel):
+        implement the "<= 2 buildings" check   -0.0081
+        never scrap a turret covering either core ring   +0.0267
+        never scrap at all   +0.2767 on a self-play screen, but only +0.0345 on
+          86 games, and it SPLITS by opponent: +0.128 vs Tyr_Jython, -0.083 vs
+          V6_earlysiege.
+    All neutral. The behaviour is worth roughly nothing either way; do not spend
+    more on it. 13 scraps in 4 games, 0 of them with an enemy turret still alive
+    -- we scrap after the job is done."""
     if map_info._bm_enemy_bots:
         return False
     rc.self_destruct()

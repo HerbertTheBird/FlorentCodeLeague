@@ -252,7 +252,8 @@ def run():
         log(f"gunner rotating to pin trapped builder toward {pin_dir}")
         return
 
-    # Truly idle -- nothing to shoot, no enemy bots, <= 2 enemy buildings in
-    # sight: this gunner's targets are gone, so recycle it.
+    # Truly idle -- nothing to shoot and no enemy bots tracked anywhere. Enemy
+    # BUILDINGS are not considered (the old comment claimed they were; that check
+    # never existed, and adding it measured -0.0081). Recycles the build scale.
     if fire_target is None:
         turret_priority.scrap_if_idle(rc)

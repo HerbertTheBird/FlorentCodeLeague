@@ -68,7 +68,9 @@ def run():
         rc.fire(chosen[0])
         return
 
-    # Nothing to shoot: recycle this sentinel if the enemy has left our view
-    # (no enemy bots, <= 2 enemy buildings). Guards on enemy presence, so a
-    # momentary ammo dip with foes still around won't scrap it.
+    # Nothing to shoot and no enemy bots tracked anywhere: recycle this sentinel
+    # for its build scale. Enemy BUILDINGS are not considered -- the old comment
+    # claimed a "<= 2 buildings" guard that never existed, and adding it measured
+    # -0.0081. Guards on enemy BOTS, so a momentary ammo dip with foes around
+    # won't scrap it.
     turret_priority.scrap_if_idle(rc)
