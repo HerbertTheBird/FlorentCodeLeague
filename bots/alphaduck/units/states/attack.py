@@ -1108,6 +1108,10 @@ SIEGE_MIN_HARVESTERS = 2
 def score(can_move=True):
     global SENTINEL_CORE_SCORE
 
+    # A rush-mode builder only places turrets within Chebyshev-4 of the enemy core.
+    if not units.builder.rush_can_act():
+        return 0
+
     if map_info.enemy_undeveloped():
         SENTINEL_CORE_SCORE = 32
         SENTINEL_BUILDING_SCORE[map_info._IDX_CORE] = SENTINEL_CORE_SCORE

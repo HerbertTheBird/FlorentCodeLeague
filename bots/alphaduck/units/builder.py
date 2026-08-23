@@ -60,6 +60,35 @@ _near_core_mask_cache: tuple[Position | None, int] = (None, 0)
 conveyor_plan: dict | None = None
 _plan_read = False
 
+# Rush mode: latched (never cleared) the moment this builder finishes its economic
+# job -- it lays the LAST step of a route (a repair connection) or completes its
+# opening conveyor plan. From then on it stops building economy (no harvest/route)
+# and only tends turrets/barriers, rushing the enemy core via explore -- except it
+# still drops everything to heal the core when the alarm sounds. See the per-state
+# gates keyed on in_rush_mode().
+_rush_mode = False
+
+def in_rush_mode() -> bool:
+    return _rush_mode
+
+def enter_rush_mode() -> None:
+    global _rush_mode
+    _rush_mode = True
+
+def rush_can_act() -> bool:
+    """Whether a rush-mode builder may ACT right now (place turrets/barriers, disrupt,
+    block, chip, non-alarm heal): only while it stands within Chebyshev-4 of the enemy
+    core. Outside that zone -- or before we know where the enemy core is -- it can only
+    MOVE (explore) toward the core. Always True when not in rush mode. The core-alarm
+    heal is exempt and handled separately (a builder can always go back to heal)."""
+    if not _rush_mode:
+        return True
+    zone = map_info.enemy_core_strike_zone()
+    if not zone:
+        return False
+    my = map_info._my_pos
+    return bool((zone >> (my.x + my.y * map_info._width)) & 1)
+
 
 def _core_ward_dir(pos: Position):
     """The cardinal direction from `pos` to its single core-adjacent neighbour,
@@ -246,6 +275,10 @@ def run():
     if not _plan_read:
         _plan_read = True
         _try_read_conveyor_plan()
+        # No opening conveyor plan rooted at us -> we have no economy to build, so
+        # rush immediately instead of falling into dead-end routing / harvest.
+        if not conveyor_plan:
+            enter_rush_mode()
     # Hold the defender-spawn reserve only while something threatening is actually
     # at our door (the sentry-alarm signal was removed with the launcher).
     map_info.arm_reserve(bool(defense.threatening_enemies()))

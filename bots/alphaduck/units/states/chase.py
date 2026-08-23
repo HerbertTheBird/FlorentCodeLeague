@@ -62,6 +62,10 @@ _cached_target = None
 def score(can_move=True):
     global _cached_target
     _cached_target = None
+    # A rush-mode builder has committed to the enemy core -- it doesn't peel back to
+    # chase raiders in our half.
+    if units.builder.in_rush_mode():
+        return 0
     if not can_move:
         return 0                            # chasing is pure movement
     claims = _my_claims()

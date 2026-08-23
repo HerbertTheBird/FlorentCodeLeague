@@ -136,6 +136,10 @@ _cached_target = None
 _is_repair = False   # was the cached target selected at the REPAIR (max-score) tier?
 def score(can_move=True):
     global _cached_target, _is_repair
+    # Rush mode: this builder has finished its economy and no longer harvests.
+    if units.builder.in_rush_mode():
+        _cached_target = None
+        return 0
     # Prefer a repair-quality target -- ore one hop from the accepting network --
     # which scores at the higher repair tier. Otherwise fall back to any
     # harvestable ore at the plain tier.

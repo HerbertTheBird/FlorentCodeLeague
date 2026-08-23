@@ -104,7 +104,15 @@ def run(can_move=True):
         return                      # movement-only state; nothing to do in place
     global explore_target, _explore_target_from_initial
     log("EXPLORE")
-    
+
+    # Rush mode: stop wandering -- march straight at the (predicted) enemy core.
+    if units.builder.in_rush_mode():
+        tgt = map_info._compute_predicted_enemy_core()
+        if tgt is not None:
+            explore_target = tgt
+            _explore_target_from_initial = False
+            nav.move_to(tgt)
+            return
 
     if units.builder._initial_explore_target is not None:
         if map_info._my_pos.distance_squared(units.builder._initial_explore_target) <= 18:

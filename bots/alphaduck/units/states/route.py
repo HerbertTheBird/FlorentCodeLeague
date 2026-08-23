@@ -367,6 +367,11 @@ MAX_SCORE = 9.2
 def score(can_move=True):
     global _cached_target, _cached_plan_action, _is_repair
     _is_repair = False
+    # Rush mode: this builder has finished its economy and no longer routes at all.
+    if units.builder.in_rush_mode():
+        _cached_plan_action = None
+        _cached_target = None
+        return 0
     # 1. Repair first -- a candidate one hop from the accepting network -- at the
     # highest tier (formerly the separate route_repair state, which outranked the
     # opening plan and ordinary routing).
@@ -431,6 +436,10 @@ def run(can_move=True):
     if _cached_plan_action is not None:
         log("ROUTE-PLAN")
         _run_plan_action(_cached_plan_action, can_move)
+        # Completing the opening plan (its last piece just went up -> nothing left to
+        # build) latches this builder into rush mode.
+        if units.builder.conveyor_plan and _plan_next_action() is None:
+            units.builder.enter_rush_mode()
         return
 
     target = _cached_target      # (destroy, nxt, seg_dist), validated in score()
@@ -466,3 +475,7 @@ def run(can_move=True):
         rc.build_conveyor(destroy, direction)
         map_info.update_at(destroy)
         built = True
+    # A repair build is the LAST step of a route -- it connects a dead end straight
+    # into the accepting network. Doing it latches this builder into rush mode.
+    if built and _is_repair:
+        units.builder.enter_rush_mode()

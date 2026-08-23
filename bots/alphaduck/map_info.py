@@ -860,6 +860,32 @@ def end_cost_exempt_conveyors() -> int:
     return _bm_conveyors & _bm_team[_my_team_idx] & ~conv_load_buckets[3]
 
 
+_strike_zone_key = None
+_strike_zone_cache = 0
+
+def enemy_core_strike_zone() -> int:
+    """Bitmask of every tile within Chebyshev-4 of an enemy-core tile -- the seen core
+    if we have it, else the symmetry-predicted core. 0 when we have no idea where
+    their core is. Cached on the core mask it was built from."""
+    global _strike_zone_key, _strike_zone_cache
+    core = _bm_their_core_area
+    if core == 0:
+        p = _compute_predicted_enemy_core()
+        if p is None:
+            return 0
+        for dx in (0, 1):
+            for dy in (0, 1):
+                x, y = p.x + dx, p.y + dy
+                if 0 <= x < _width and 0 <= y < _height:
+                    core |= 1 << (x + y * _width)
+        if core == 0:
+            return 0
+    if core != _strike_zone_key:
+        _strike_zone_key = core
+        _strike_zone_cache = expand_chebyshev(core, 4)
+    return _strike_zone_cache
+
+
 def enemy_undeveloped() -> bool:
     """True while the enemy has almost nothing: at most ONE known enemy builder bot
     and FEWER THAN TWO enemy harvesters. This is the gate that turns the aggressive

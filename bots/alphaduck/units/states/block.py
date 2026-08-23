@@ -132,6 +132,9 @@ def score(can_move=True):
     global _cached_target, _cached_walk
     _cached_target = None
     _cached_walk = None
+    # A rush-mode builder only acts within Chebyshev-4 of the enemy core.
+    if not units.builder.rush_can_act():
+        return 0
     # While the enemy is undeveloped we're rushing their core -- don't peel builders
     # off to barrier-block a bot with no economy worth choking.
     if map_info.enemy_undeveloped():

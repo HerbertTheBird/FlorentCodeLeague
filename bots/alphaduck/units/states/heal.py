@@ -78,10 +78,25 @@ _HEAL_PRIORITY[map_info._IDX_LAUNCHER] = 5
 _HEAL_PRIORITY[map_info._IDX_CORE] = 6
 
 
+def _rush_heal_mask() -> int:
+    """In rush mode the only buildings a builder will heal are our TURRETS and
+    BARRIERS -- plus the CORE while the alarm is on. Outside rush mode this is an
+    all-ones mask (no restriction)."""
+    if not units.builder.in_rush_mode():
+        return ~0
+    allowed = (map_info._bm_et[map_info._IDX_GUNNER]
+               | map_info._bm_et[map_info._IDX_SENTINEL]
+               | map_info._bm_et[map_info._IDX_LAUNCHER]
+               | map_info._bm_et[map_info._IDX_BARRIER])
+    if comms.core_alarm():
+        allowed |= map_info._bm_my_core_area
+    return allowed
+
+
 def _do_best_heal():
     w, h = map_info._width, map_info._height
     my = map_info._bm_team[map_info._my_team_idx]
-    healable = my & map_info._bm_damaged
+    healable = my & map_info._bm_damaged & _rush_heal_mask()
     my_pos = map_info._my_pos
     best_score = -1
     best_tiles = []
@@ -203,7 +218,7 @@ def _find_target():
     my_bit = 1 << (my_pos.x + my_pos.y * w)
     enemy_bots = map_info._bm_enemy_bots
 
-    damaged_any = my & map_info._bm_damaged & map_info._bm_visible
+    damaged_any = my & map_info._bm_damaged & map_info._bm_visible & _rush_heal_mask()
     # While the core is still healthy (>= CORE_HEAL_HP) it isn't a real heal target
     # -- drop it from the candidates. score() offers a low-priority idle top-off
     # instead. Below the threshold it stays in and heals like anything else.
@@ -413,7 +428,7 @@ def _adjacent_multi_damaged() -> bool:
     if _core_hp() >= CORE_HEAL_HP:
         dmg = dmg & ~map_info._bm_my_core_area
     dmg = dmg & ~_dueling_turrets()        # a dueling turret isn't a heal emergency
-    adj_damaged = _heal_worthy(map_info.manhattan(my_bit) & my & dmg)
+    adj_damaged = _heal_worthy(map_info.manhattan(my_bit) & my & dmg & _rush_heal_mask())
     return adj_damaged.bit_count() >= 2
 
 
@@ -422,6 +437,9 @@ def _idle_core_target():
     healthy (>= CORE_HEAL_HP), else None. Heal's last-resort idle job."""
     core_area = map_info._bm_my_core_area
     if not core_area:
+        return None
+    # In rush mode the core is off-limits unless the alarm is on.
+    if units.builder.in_rush_mode() and not comms.core_alarm():
         return None
     # Above CORE_ALWAYS_HEAL_HP the core is a valid heal target ONLY when it alarms;
     # otherwise it's healthy enough to leave alone.
@@ -453,6 +471,11 @@ def score(can_move=True):
                 # Critically low core under alarm -> MAX_SCORE (outranks attack);
                 # otherwise the alarm heal sits just below attack at NORMAL_SCORE.
                 return MAX_SCORE if _core_hp() < CRITICAL_CORE_HP else NORMAL_SCORE
+    # Rush mode: only heal (turrets/barriers) while within Chebyshev-4 of the enemy
+    # core. The alarm branch above is exempt -- a builder can always go back to heal.
+    if not units.builder.rush_can_act():
+        _cached_target = None
+        return 0
     target = _find_target()
     if target is not None:
         target = _detour_target(target)       # only detours when adjacent to primary
