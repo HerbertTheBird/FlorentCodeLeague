@@ -299,27 +299,31 @@ def _can_hit_enemy_core(rc) -> bool:
 
 
 def should_hold_fire(rc, target_pos) -> bool:
-    """Conserve ammo: hold fire when the core's broadcast income is <= 1 (0 or 1 -- we
-    are barely generating any resources), an enemy builder bot is in sight, and the
-    shot would be wasted -- the target is at FULL HP (an adjacent enemy builder just
-    heals it back) or is the enemy CORE (a huge HP pool we can't meaningfully dent).
-    Applies to both gunner and sentinel. `target_pos` is the tile we'd fire at. Only
-    kicks in after turn 100 -- early game we always shoot."""
+    """Conserve ammo: hold fire on the enemy CORE (a 500 HP pool we cannot
+    meaningfully dent) when the core's broadcast income is <= 1 (0 or 1 -- we are
+    barely generating any resources) and an enemy builder bot is in sight. Applies
+    to both gunner and sentinel. `target_pos` is the tile we'd fire at. Only kicks
+    in after turn 100 -- early game we always shoot.
+
+    This used to also veto any target at FULL HP, on the theory that an adjacent
+    enemy builder just heals it back. That rule could never release: a target we
+    refuse to shoot never leaves full HP, so the veto was permanent rather than
+    temporary, and it silenced turrets against fresh enemy gunners aimed at them.
+    Repair pressure is already modelled where it belongs -- `_double_healer_ring`
+    demotes targets with >=2 healers on them, and the gunner's econ rules skip
+    anything with a builder cardinally adjacent."""
     if rc.get_current_round() <= 100:
         return False
     if comms.core_income() > 1:
         return False
     if not map_info._bm_enemy_bots:
         return False
-    bot_id = rc.get_tile_builder_bot_id(target_pos)
-    if bot_id is not None:
-        return rc.get_hp(bot_id) >= rc.get_max_hp(bot_id)      # full-HP bot
+    if rc.get_tile_builder_bot_id(target_pos) is not None:
+        return False                        # a bot is hit before the tile's building
     bid = rc.get_tile_building_id(target_pos)
     if bid is None:
         return False
-    if rc.get_entity_type(bid) == EntityType.CORE:
-        return True                                           # the enemy core
-    return rc.get_hp(bid) >= rc.get_max_hp(bid)               # full-HP building
+    return rc.get_entity_type(bid) == EntityType.CORE
 
 
 def scrap_if_idle(rc) -> bool:

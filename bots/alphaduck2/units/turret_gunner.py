@@ -6,6 +6,12 @@ import units.turret_priority as turret_priority
 
 ONE_SHOT_HP = GameConstants.GUNNER_DAMAGE  # 7
 
+# Economy kinds: worth shooting, but only when no enemy builder is cardinally
+# adjacent to repair them faster than we chip. Both the fire rules and the
+# rotate rules gate on this -- if only the fire side did, we would spend 10 Ti
+# rotating onto a target we then decline to shoot, every turn, forever.
+_ECON_KINDS = frozenset(('harvester', 'launcher', 'barrier', 'conveyor'))
+
 rc: Controller = None
 nav: Pathing = None
 my_pos: Position = None
@@ -176,7 +182,18 @@ def run():
     if rc.get_action_cooldown() > 0:
         return
 
+    # No ammo means every can_fire() below is False, so the ladder would fall
+    # straight through to the rotate rules and burn 10 Ti a turn lining up shots
+    # we cannot take -- and the core's ammo budget is min(30, resources - 4), so
+    # that spending is exactly what keeps us out of ammo. Sit still instead.
+    # Returning here (rather than just suppressing rotation) also avoids handing
+    # a temporarily dry turret to scrap_if_idle.
+    if rc.get_global_ammo() < GameConstants.GUNNER_AMMO_COST:
+        return
+
     current = rc.get_direction()
+    # Rotating costs titanium only; the extra GUNNER_AMMO_COST is a titanium
+    # buffer so the core can still convert one shot's worth of ammo afterwards.
     rotate_cost = GameConstants.GUNNER_ROTATE_COST + GameConstants.GUNNER_AMMO_COST
     can_rotate = rc.get_global_resources() >= rotate_cost
     w = map_info._width
@@ -205,20 +222,27 @@ def run():
             return True
         return False
 
+    def would_fire(h) -> bool:
+        """Would the fire rules actually take this shot once we are facing it?
+        Every reason to decline must be checked here too, or we rotate onto a
+        target we then refuse and rotate away again next turn."""
+        if h[0] in _ECON_KINDS and _enemy_bot_cardinally_adjacent(h[1]):
+            return False
+        return not turret_priority.should_hold_fire(rc, h[1])
+
     def turn_to(pred):
-        """First non-current facing whose ray hit matches `pred` and isn't a hold-fire
-        (wasted) target, else None -- so we don't spend rotate-ammo to line up a shot
-        we'd then decline to take."""
+        """First non-current facing whose ray hit matches `pred` and is a shot we
+        would actually take, else None -- so we never spend 10 Ti lining up a shot
+        we'd then decline."""
         for d, h in hits.items():
             if d == current or h is None:
                 continue
-            if pred(h) and not turret_priority.should_hold_fire(rc, h[1]):
+            if pred(h) and would_fire(h):
                 return d
         return None
 
     def econ_fireable(h) -> bool:
-        return (h[0] in ('harvester', 'launcher', 'barrier', 'conveyor')
-                and not _enemy_bot_cardinally_adjacent(h[1]))
+        return h[0] in _ECON_KINDS and not _enemy_bot_cardinally_adjacent(h[1])
 
     def is_loaded_conv(h) -> bool:
         return h[0] == 'conveyor' and (loaded >> (h[1].x + h[1].y * w)) & 1

@@ -62,12 +62,17 @@ def run():
             etype, hp = resolved
             raw.append((tile, tile.x + tile.y * w, _WEIGHTS.get(etype, 0), hp, etype))
         priority_sets = turret_priority.compute_priority_sets(rc)
-        chosen = turret_priority.select_best(raw, priority_sets, nav, 0)
+        # one_shot_hp is what THIS turret kills outright in a single shot, so the
+        # tiebreak prefers finishing a target over spreading damage. It was 0,
+        # which no live entity's HP can be <=, so the whole one-shot branch of
+        # _apply_tiebreaks was dead for sentinels.
+        chosen = turret_priority.select_best(
+            raw, priority_sets, nav, GameConstants.SENTINEL_DAMAGE)
 
     if chosen is not None:
-        # Conserve ammo: hold fire on a wasted shot (full-HP target or the enemy core
-        # while income is <=1 and an enemy builder is near). We still had a target, so
-        # don't fall through to scrap.
+        # Conserve ammo: hold fire on a wasted shot (the enemy core while income is
+        # <=1 and an enemy builder is near). We still had a target, so don't fall
+        # through to scrap.
         if not turret_priority.should_hold_fire(rc, chosen[0]):
             rc.fire(chosen[0])
         return
