@@ -1,0 +1,235 @@
+from main import has_op
+import random
+from itertools import combinations
+
+from fcode import Controller, Direction, Environment, Position
+
+import map_info
+from log import DRAW_DEBUG
+
+# Number of initial builder bots that follow the core's spawn plan. Also caps the
+# ore-group merge (core.py) to this many groups -- one opening builder per group.
+# (alphaduck shipped 4: 5 was tried there and lost hard to Tyr, 14W-16L -> 7W-23L.)
+#
+# bird1 opens on ONE builder. The knock-on effects, all of them intentional:
+#   - core.starting_convs merges every visible ore group down to a single group
+#     (<= 4 ores, solve_gst's cap), so the one opening builder gets one conveyor
+#     tree instead of the board being split four ways.
+#   - core.run's fan-out budget is max(0, 1 - num_groups), i.e. zero whenever any
+#     ore is visible at round 0, so nothing spawns after round 0's conv builder.
+#   - after the opening the core only spawns on demand (_find_defense_target), so
+#     the fleet grows from defence, not from a fixed opening budget.
+# comms._NUM_ORIGINAL stays 4 on purpose: it maps SPAWN ROUND -> comm pair, not
+# opening-builder count, and rounds 1-3 are still live spawn rounds for defence.
+INITIAL_SPAWN_COUNT = 1
+
+# Chebyshev-step cap for a builder bot's initial ray-follow exploration.
+# The core draws lines capped to +1 to account for the bot starting one step out from the core.
+INITIAL_EXPLORE_MAX_STEPS = 12
+
+DIRECTIONS = map_info._DIRECTIONS
+
+DIAGONAL = {
+    Direction.NORTHEAST,
+    Direction.SOUTHEAST,
+    Direction.SOUTHWEST,
+    Direction.NORTHWEST,
+}
+
+
+def dir_distance(a: Direction, b: Direction) -> int:
+    ia = DIRECTIONS.index(a)
+    ib = DIRECTIONS.index(b)
+    diff = abs(ia - ib)
+    return min(diff, 8 - diff)
+
+
+def get_ray_endpoint(start: Position, direction: Direction, width: int, height: int, max_steps: int | None = None) -> Position:
+    dx, dy = map_info._DIRECTION_DELTAS[direction]
+    x, y = start.x, start.y
+    steps = 0
+    while True:
+        if max_steps is not None and steps >= max_steps:
+            return Position(x, y)
+        nx, ny = x + dx, y + dy
+        if nx < 0 or nx >= width or ny < 0 or ny >= height:
+            return Position(x, y)
+        x, y = nx, ny
+        steps += 1
+
+
+def _all_dir_endpoints(core_pos: Position, width: int, height: int):
+    return [(d, get_ray_endpoint(core_pos, d, width, height)) for d in DIRECTIONS]
+
+
+def _build_ti_near_mask(rc: Controller) -> int:
+    """Bitmap of tiles within Chebyshev 1 (dist² ≤ 2) of a visible titanium ore."""
+    w = map_info._width
+    ti_mask = 0
+    for p in rc.get_nearby_tiles():
+        if rc.get_tile_env(p) == Environment.ORE_TITANIUM:
+            ti_mask |= 1 << (p.x + p.y * w)
+    if not ti_mask:
+        return 0
+    return map_info.expand_chebyshev(ti_mask)
+
+
+def _ray_hits_mask(core_pos: Position, direction: Direction, width: int, height: int, mask: int) -> bool:
+    if not mask:
+        return False
+    dx, dy = map_info._DIRECTION_DELTAS[direction]
+    w = width
+    x, y = core_pos.x + dx, core_pos.y + dy
+    while 0 <= x < width and 0 <= y < height:
+        if mask & (1 << (x + y * w)):
+            return True
+        x += dx
+        y += dy
+    return False
+
+
+def get_valid_directions(rc: Controller, core_pos: Position, width: int, height: int):
+    ti_near = _build_ti_near_mask(rc)
+    valid = []
+    for d, endpoint in _all_dir_endpoints(core_pos, width, height):
+        if not rc.is_in_vision(endpoint):
+            valid.append((d, endpoint))
+        elif _ray_hits_mask(core_pos, d, width, height, ti_near):
+            valid.append((d, endpoint))
+    return valid
+
+
+# Tried and rejected: making visible ore a *preference* between directions
+# rather than only a filter on which are admissible. `get_valid_directions`
+# already drops bearings with neither unexplored ground nor ore on them, but the
+# selection below then maximises pure angular spread, so a bearing with three ore
+# scores identically to one with none. Counting the ore hits and multiplying the
+# spread score by (1 + 0.6 * hits) pointed the opening at the ore we could
+# already see -- and lost 2.3 points over the full suite (64.4% -> 62.1%).
+#
+# The split says why it is not simply wrong: loki 68.2% -> 74.2%, but Khaos
+# 65.2% -> 59.1% and Heimdall v3 54.5% -> 48.5%. Concentrating the opening on
+# known ore wins the economy race and loses the map. Games also ran far longer,
+# which is the tell -- more of them reached the 1000-turn tiebreak because
+# neither side had the board presence to close.
+def pick_n_directions(pool, n: int):
+    if len(pool) <= n:
+        return list(pool)
+
+    best = tuple(range(n))
+    best_score = -1
+    best_diagonal_count = sum(1 for k in best if pool[k][0] in DIAGONAL)
+    
+    for combo in combinations(range(len(pool)), n):
+        # Maximize angular distance between chosen directions
+        score = 1
+        for i in range(n):
+            for j in range(i + 1, n):
+                score *= dir_distance(pool[combo[i]][0], pool[combo[j]][0])
+
+        # Tiebreak by preferring diagonals
+        diagonal_count = sum(1 for k in combo if pool[k][0] in DIAGONAL)
+        if score > best_score or (score == best_score and diagonal_count > best_diagonal_count):
+            best_score = score
+            best_diagonal_count = diagonal_count
+            best = combo
+
+    return [pool[k] for k in best]
+
+
+def pick_n_directions_with_fixed(pool, n: int, fixed_dirs):
+    """Like `pick_n_directions`, but maximise the angular spread of the chosen
+    directions TOGETHER WITH `fixed_dirs` -- bearings already committed to (e.g.
+    the ore groups builders are being sent to). Scores every candidate combo by
+    the same product-of-pairwise-distances metric v6 uses, extended to also
+    include chosen<->fixed pairs, so the fan-out spreads away from both the other
+    fan-out bots and the ore-group bots. Returns up to n (direction, endpoint)
+    pairs from `pool`. With no fixed_dirs it is identical to pick_n_directions."""
+    if n <= 0:
+        return []
+    if len(pool) <= n:
+        return list(pool)
+
+    best = tuple(range(n))
+    best_score = -1
+    best_diagonal_count = -1
+    for combo in combinations(range(len(pool)), n):
+        chosen = [pool[k][0] for k in combo]
+        score = 1
+        for i in range(n):
+            for j in range(i + 1, n):
+                score *= dir_distance(chosen[i], chosen[j])
+        for cd in chosen:
+            for fd in fixed_dirs:
+                score *= dir_distance(cd, fd)
+        diagonal_count = sum(1 for cd in chosen if cd in DIAGONAL)
+        if score > best_score or (score == best_score and diagonal_count > best_diagonal_count):
+            best_score = score
+            best_diagonal_count = diagonal_count
+            best = combo
+
+    return [pool[k] for k in best]
+
+
+def choose_fanout_plan(rc: Controller, core_pos: Position, n: int, fixed_dirs):
+    """Directions for the `n` opening builders left over after the ore groups
+    have been assigned. Uses the same admissible-direction filter and v6 spread
+    algorithm as `choose_spawn_plan`, but keeps the chosen bearings maximally
+    spread from `fixed_dirs` (the ore-group directions) too, for the best overall
+    coverage. Returns a list of Directions (may be shorter than n)."""
+    if n <= 0:
+        return []
+    width = rc.get_map_width()
+    height = rc.get_map_height()
+    valid = get_valid_directions(rc, core_pos, width, height)
+    if not valid:
+        pool = [d for d in DIRECTIONS if d not in fixed_dirs] or list(DIRECTIONS)
+        return random.sample(pool, min(n, len(pool)))
+    chosen = pick_n_directions_with_fixed(valid, n, fixed_dirs)
+    center = Position(width // 2, height // 2)
+    center_dir = map_info.direction_to(core_pos, center)
+    chosen.sort(key=lambda de: (dir_distance(de[0], center_dir), de[1].distance_squared(center)))
+    result = [d for (d, _) in chosen]
+
+    # Spend the WHOLE opening budget: if fewer than `n` bearings were admissible
+    # (e.g. most directions point into already-seen, ore-less ground), pad with the
+    # remaining directions -- most-spread from what we already have -- so the core
+    # still spawns all `n` opening builders rather than silently dropping some.
+    if len(result) < n:
+        taken = set(result) | set(fixed_dirs)
+        remaining = [d for d in DIRECTIONS if d not in taken]
+        while len(result) < n and remaining:
+            anchors = result + list(fixed_dirs)
+            best = max(remaining, key=lambda d: min(
+                (dir_distance(d, o) for o in anchors), default=99))
+            result.append(best)
+            remaining.remove(best)
+    return result
+
+
+def draw_spawn_plan(rc: Controller, core_pos: Position, spawn_plan, width: int, height: int) -> None:
+    if not DRAW_DEBUG:
+        return
+    for d in spawn_plan:
+        endpoint = get_ray_endpoint(core_pos, d, width, height, max_steps=INITIAL_EXPLORE_MAX_STEPS + 1)
+        rc.draw_indicator_line(core_pos, endpoint, 0, 255, 0)
+
+
+def choose_spawn_plan(rc: Controller, core_pos: Position, n: int):
+    width = rc.get_map_width()
+    height = rc.get_map_height()
+    
+    # Filter directions first
+    valid = get_valid_directions(rc, core_pos, width, height)
+    if len(valid) == 0:
+        return random.sample(DIRECTIONS, n)
+
+    # Then pick best subset
+    chosen = pick_n_directions(valid, n)
+
+    # Spawn in order of closeness to center
+    center = Position(width // 2, height // 2)
+    center_dir = map_info.direction_to(core_pos, center)
+    chosen.sort(key=lambda de: (dir_distance(de[0], center_dir), de[1].distance_squared(center)))
+
+    return [d for (d, _) in chosen]
