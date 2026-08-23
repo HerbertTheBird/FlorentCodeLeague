@@ -65,7 +65,11 @@ def run():
         chosen = turret_priority.select_best(raw, priority_sets, nav, 0)
 
     if chosen is not None:
-        rc.fire(chosen[0])
+        # Conserve ammo: hold fire on a wasted shot (full-HP target or the enemy core
+        # while income is <=1 and an enemy builder is near). We still had a target, so
+        # don't fall through to scrap.
+        if not turret_priority.should_hold_fire(rc, chosen[0]):
+            rc.fire(chosen[0])
         return
 
     # Nothing to shoot: recycle this sentinel if the enemy has left our view

@@ -18,7 +18,9 @@ and a builder attack does 2 damage, so the building survives iff
     current_hp > 2 * attacks
 
 If my_dist <= enemy_dist we win regardless of HP (0 hits land first). Buildings we
-cannot save in time are dropped. Only DAMAGED buildings are targets -- a full-HP
+cannot save in time are dropped -- EXCEPT conveyors and harvesters, for which
+arriving the same turn the building would die still counts (we heal before the
+enemy's final blow that turn), so for those the bar is current_hp >= 2 * attacks. Only DAMAGED buildings are targets -- a full-HP
 building an enemy stands beside is not one. Among the survivors we pick: closest,
 then lowest HP, then nearest our core by Manhattan.
 """
@@ -26,6 +28,7 @@ import map_info
 import pathing
 from pathing import Pathing
 import units.builder
+import comms
 from fcode import Controller, Position, GameConstants
 from log import log
 import random
@@ -49,6 +52,9 @@ HEAL_MIN_DAMAGE = 2
 # Below the threshold the core heals like any other building.
 CORE_HEAL_HP = 350
 CORE_IDLE_SCORE = 1.25
+# Above this HP the core is healthy enough that we DON'T tend it at all unless it
+# raises its distress alarm -- no idle top-off, no heal target.
+CORE_ALWAYS_HEAL_HP = 450
 
 
 def init(c: Controller):
@@ -159,6 +165,19 @@ def _heal_worthy(mask: int) -> int:
     return _damage_over(mask, HEAL_MIN_DAMAGE)
 
 
+def _dueling_turrets() -> int:
+    """My turrets sitting in an enemy turret's line of fire. Healing one of these is
+    babysitting a turret duel, not saving a building from a rush -- so it must NOT
+    lift heal above attack. heal drops them from its target set; the builder attacks
+    (or works) instead, and _do_best_heal still tops one off for free if we happen to
+    stand beside it."""
+    my = map_info._bm_team[map_info._my_team_idx]
+    turrets = (map_info._bm_et[map_info._IDX_GUNNER]
+               | map_info._bm_et[map_info._IDX_SENTINEL]
+               | map_info._bm_et[map_info._IDX_LAUNCHER]) & my
+    return turrets & map_info._bm_enemy_turret_threat
+
+
 def _core_hp() -> int:
     """Max HP reported across our core's 2x2 cells (all live cells share the core's
     HP; max() just skips any unknown -1). A large sentinel if we have no core."""
@@ -189,6 +208,9 @@ def _find_target():
     # instead. Below the threshold it stays in and heals like anything else.
     if _core_hp() >= CORE_HEAL_HP:
         damaged_any &= ~map_info._bm_my_core_area
+    # A turret trading fire with an enemy turret is not a rescue target (see
+    # _dueling_turrets): don't let it monopolise a builder that could be attacking.
+    damaged_any &= ~_dueling_turrets()
     # Only buildings a heal would actually be spent on. A lightly-dented building
     # (<= HEAL_MIN_DAMAGE) used to be kept if its HP had just moved, on the theory
     # it was under active fire -- but _do_best_heal declines to top off a 1-2 point
@@ -232,8 +254,19 @@ def _find_target():
                 enemy_dist = ed
         hp = map_info._building_hp[n]
         attacks = my_dist - enemy_dist                # hits that land before we heal
-        if attacks > 0 and hp <= attacks * BUILDER_ATTACK_DMG:
-            continue                                  # dies before we can save it
+        if attacks > 0:
+            lethal_dmg = attacks * BUILDER_ATTACK_DMG
+            et = map_info._building_et_idx[n]
+            # Conveyors and harvesters: arriving the SAME turn it would die still
+            # counts -- we move (and heal) before the enemy's final blow that turn, so
+            # a building sitting at exactly `lethal_dmg` survives. Every other building
+            # keeps the stricter cutoff (a same-turn arrival is treated as too late).
+            if et == map_info._IDX_CONVEYOR or et == map_info._IDX_HARVESTER:
+                dies = hp < lethal_dmg
+            else:
+                dies = hp <= lethal_dmg
+            if dies:
+                continue                              # dies before we can save it
         key = (my_dist, hp, _manh_to_core(n % w, n // w))
         if best_key is None or key < best_key:
             best_key = key
@@ -364,6 +397,8 @@ def _detour_target(primary: Position):
 # outrank attack.
 MAX_SCORE = 9.5
 NORMAL_SCORE = 8.75
+# Core HP below which an alarm heal jumps from NORMAL_SCORE to MAX_SCORE.
+CRITICAL_CORE_HP = 300
 _cached_target = None
 
 
@@ -376,6 +411,7 @@ def _adjacent_multi_damaged() -> bool:
     dmg = map_info._bm_damaged
     if _core_hp() >= CORE_HEAL_HP:
         dmg = dmg & ~map_info._bm_my_core_area
+    dmg = dmg & ~_dueling_turrets()        # a dueling turret isn't a heal emergency
     adj_damaged = _heal_worthy(map_info.manhattan(my_bit) & my & dmg)
     return adj_damaged.bit_count() >= 2
 
@@ -385,6 +421,10 @@ def _idle_core_target():
     healthy (>= CORE_HEAL_HP), else None. Heal's last-resort idle job."""
     core_area = map_info._bm_my_core_area
     if not core_area:
+        return None
+    # Above CORE_ALWAYS_HEAL_HP the core is a valid heal target ONLY when it alarms;
+    # otherwise it's healthy enough to leave alone.
+    if _core_hp() > CORE_ALWAYS_HEAL_HP and not comms.core_alarm():
         return None
     if not _heal_worthy(core_area & map_info._bm_damaged & map_info._bm_visible):
         return None                            # core not dented -> nothing to do
@@ -401,6 +441,17 @@ def score(can_move=True):
         # every turn via _do_best_heal(), so there's nothing extra for the retry.
         _cached_target = None
         return 0
+    # Core distress alarm: the core broadcast that its HP fell below the threshold.
+    # Every builder drops what it's doing and heals the core at top priority.
+    if comms.core_alarm():
+        core_area = map_info._bm_my_core_area
+        if core_area:
+            tgt, _ = nav.closest(core_area)
+            if tgt is not None:
+                _cached_target = tgt
+                # Critically low core under alarm -> MAX_SCORE (outranks attack);
+                # otherwise the alarm heal sits just below attack at NORMAL_SCORE.
+                return MAX_SCORE if _core_hp() < CRITICAL_CORE_HP else NORMAL_SCORE
     target = _find_target()
     if target is not None:
         target = _detour_target(target)       # only detours when adjacent to primary

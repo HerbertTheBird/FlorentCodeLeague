@@ -178,7 +178,22 @@ def choose_fanout_plan(rc: Controller, core_pos: Position, n: int, fixed_dirs):
     center = Position(width // 2, height // 2)
     center_dir = map_info.direction_to(core_pos, center)
     chosen.sort(key=lambda de: (dir_distance(de[0], center_dir), de[1].distance_squared(center)))
-    return [d for (d, _) in chosen]
+    result = [d for (d, _) in chosen]
+
+    # Spend the WHOLE opening budget: if fewer than `n` bearings were admissible
+    # (e.g. most directions point into already-seen, ore-less ground), pad with the
+    # remaining directions -- most-spread from what we already have -- so the core
+    # still spawns all `n` opening builders rather than silently dropping some.
+    if len(result) < n:
+        taken = set(result) | set(fixed_dirs)
+        remaining = [d for d in DIRECTIONS if d not in taken]
+        while len(result) < n and remaining:
+            anchors = result + list(fixed_dirs)
+            best = max(remaining, key=lambda d: min(
+                (dir_distance(d, o) for o in anchors), default=99))
+            result.append(best)
+            remaining.remove(best)
+    return result
 
 
 def draw_spawn_plan(rc: Controller, core_pos: Position, spawn_plan, width: int, height: int) -> None:

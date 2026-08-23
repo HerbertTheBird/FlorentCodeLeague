@@ -293,7 +293,7 @@ def run():
         # The alarm is published unconditionally, every round: readers use the
         # flipping heartbeat to tell "quiet" from "sentry is dead".
         target = _alarm_target(sentry_pos)
-        comms.write_alarm(sentry_pos, target[0] if target else None)
+        # sentry alarm removed (no launchers, no alarm slot in the 2-slot protocol)
         adjacent = _adjacent_friendly_bot_ids()
         new_bot_ids = adjacent - _prev_adjacent_bots
         _prev_adjacent_bots = adjacent

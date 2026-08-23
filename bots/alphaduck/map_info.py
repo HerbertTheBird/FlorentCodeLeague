@@ -277,12 +277,6 @@ _bot_at: dict[int, int] = {}    # tile index -> uid
 _bot_last_seen: dict[int, int] = {}   # uid -> round it was last seen alive in vision
 _bot_pos_history: dict[int, list[int]] = {}  # uid -> newest-first observed tile indices
 _BOT_HISTORY_LIMIT = 12
-# Teammates pulled from the global comm store (up to 14 builder slots) carry no real
-# id, so each is tracked under a synthetic uid = _COMM_UID_BASE + tile: unique per
-# tile, never collides with a real (small) bot id, and -- being huge -- never counts
-# as a "lower id" in chip's id-priority claim. See add_comm_allies().
-_COMM_UID_BASE = 1_000_000
-_bm_comm_prev: int = 0           # last turn's comm-ally tile mask (for parked detection)
 
 _max_id_by_round: list[int] = []  # max_id_by_round[round] = max entity id seen up to that round
 _max_id_seen: int = 0
@@ -787,8 +781,12 @@ def _carrying_expand(
 def _compute_carrying() -> int:
     """Bitmask of conveyors believed to carry titanium.
 
-    A conveyor Y is believed to carry titanium if any conveyor within 3 upstream
-    OR 3 downstream hops of Y (inclusive) is observed carrying it.
+    A conveyor Y is believed to carry titanium if EITHER:
+      - any conveyor within 3 upstream or 3 downstream hops of Y (inclusive) is
+        observed carrying it, OR
+      - Y is within 3 hops DOWNSTREAM (inclusive) of a conveyor a harvester
+        actually feeds -- harvesters are a continuous source, so their belt is
+        believed loaded even with no observed stack. Forward-only, belief-only.
     """
     global _carrying_cache_key, _carrying_cache
     key = (_struct_version, _bm_conv_ti)
@@ -810,61 +808,56 @@ def _compute_carrying() -> int:
         _carrying_expand(ti_seed, bm_conveyors, reverse, harvesters, w, nlc, nrc)
         if ti_seed else 0
     )
+
+    # A harvester is a continuous titanium source, so a conveyor it actually feeds
+    # is believed to carry -- and so is everything up to 3 hops DOWNSTREAM of it --
+    # even when we have never observed a stack on it. This seed is forward-only: it
+    # NEVER expands upstream, and it only feeds the *believed* set (`_bm_ti_carrying`);
+    # `_bm_conv_ti` (actual/observed carrying) is untouched, so jam detection and any
+    # logic that reads real titanium is unaffected. "Fed" means the harvester sits on
+    # one of the conveyor's three accepting sides -- i.e. NOT the side it outputs to
+    # (a harvester on the output side never delivers into the belt).
+    convs = _bm_et[_IDX_CONVEYOR]
+    if harvesters and convs:
+        ntr, nbr = _not_top_row, _not_bottom_row
+        dm = _bm_dir
+        # Conveyors that have a harvester on a given side.
+        h_on_N = (harvesters & nbr) << w          # harvester north of the conveyor
+        h_on_S = (harvesters & ntr) >> w          # harvester south of the conveyor
+        h_on_E = (harvesters & nlc) >> 1          # harvester east of the conveyor
+        h_on_W = (harvesters & nrc) << 1          # harvester west of the conveyor
+        # Fed = harvester on any accepting side (all sides except the output side).
+        fed = (
+            (convs & dm[_DIR_E] & (h_on_N | h_on_S | h_on_W))
+            | (convs & dm[_DIR_W] & (h_on_N | h_on_S | h_on_E))
+            | (convs & dm[_DIR_N] & (h_on_S | h_on_E | h_on_W))
+            | (convs & dm[_DIR_S] & (h_on_N | h_on_E | h_on_W))
+        )
+        if fed:
+            ti |= fed
+            cur = fed
+            for _ in range(3):                    # seed + 3 hops downstream
+                nxt = _conveyor_target_tiles(cur) & bm_conveyors & ~ti
+                if not nxt:
+                    break
+                ti |= nxt
+                cur = nxt
+
     _carrying_cache_key = key
     _carrying_cache = ti
     return ti
 
 
-_end_cost_exempt_cache_version: int = -1
-_end_cost_exempt_cache: int = 0
-
-
 def end_cost_exempt_conveyors() -> int:
-    """Conveyors that point into our core, have NO conveyor feeding them, and NO
-    adjacent harvester.
+    """Conveyors that attach to the network for FREE -- exempt from the conveyor
+    end-cost penalty in bfs_route: any of MY conveyors whose titanium load is NOT
+    in the top quartile (the last `conv_load_buckets` bucket).
 
-    Such a conveyor is an empty feed line straight into the core: routing onto it
-    just completes that line, so it should attach for free rather than paying the
-    conveyor end cost. Cached on `_struct_version`."""
-    global _end_cost_exempt_cache_version, _end_cost_exempt_cache
-    if _struct_version == _end_cost_exempt_cache_version:
-        return _end_cost_exempt_cache
-    _end_cost_exempt_cache_version = _struct_version
-
-    reverse = _conv_reverse
-    bm_conveyors = _bm_conveyors
-    my_convs = bm_conveyors & _bm_team[_my_team_idx]
-    harvesters = _bm_et[_IDX_HARVESTER]
-    w = _width
-    nlc = _not_left_col
-    nrc = _not_right_col
-
-    # Core-facing conveyors: our conveyors whose output is a core tile.
-    facers = 0
-    m = _bm_my_core_area
-    while m:
-        b = m & -m
-        m ^= b
-        n = b.bit_length() - 1
-        if n < len(reverse):
-            facers |= reverse[n]
-    facers &= my_convs
-
-    result = 0
-    m = facers
-    while m:
-        b = m & -m
-        m ^= b
-        yn = b.bit_length() - 1
-        if reverse[yn] & bm_conveyors:
-            continue                                  # something feeds it
-        adj = ((b & nlc) >> 1) | ((b & nrc) << 1) | (b >> w) | (b << w)
-        if adj & harvesters:
-            continue                                  # a harvester feeds it
-        result |= b
-
-    _end_cost_exempt_cache = result
-    return result
+    Only a belt that is already near-full should cost extra to pile onto; a belt
+    with spare capacity (or an empty one, which is in no bucket) is fine to attach
+    to. Load is observed-ti only (`_bm_conv_ti`), recomputed each turn by
+    `_compute_conv_load`, so this is just a couple of bit ops -- no caching."""
+    return _bm_conveyors & _bm_team[_my_team_idx] & ~conv_load_buckets[3]
 
 
 def update_at(pos: Position) -> None:
@@ -1258,6 +1251,171 @@ def update_symmetry_from_comms(sym_bits):
         _ver_sym = False
     if not (sym_bits & 4):
         _rot_sym = False
+
+
+# --- new 2-slot comms integration (bit0=rot, bit1=ver, bit2=hor everywhere) ---
+_comm_enemy_ids: dict = {}       # tile index -> enemy id mod 128 (this turn only)
+_seen_enemy_ids: set = set()     # enemy ids (mod 128) this unit sees itself THIS turn
+_seen_uids: set = set()          # builder-bot uids this unit sees itself THIS turn
+# Claim tiebreak partition of _bm_friendly_bots (rebuilt each turn in set_comm_bots):
+#   _bm_friendly_tie_lose -- other bots I WIN equal-distance ties against (I claim)
+#   _bm_friendly_tie_win  -- other bots that WIN ties against me (they claim)
+# I win iff I saw the bot THIS turn OR its id > mine; else (global/stale, lower id) it wins.
+_bm_friendly_tie_lose: int = 0
+_bm_friendly_tie_win: int = 0
+_comm_core_sym3: int = 0         # last symmetry word the core broadcast
+_sym3_cache_key = None
+_sym3_cache_val = 0
+
+
+def note_comm_sym_possible(mask3: int) -> None:
+    """Fold a peer's still-possible-symmetry mask (bit0 rot, bit1 ver, bit2 hor):
+    a symmetry someone has ruled out is truly ruled out for us too."""
+    global _hor_sym, _ver_sym, _rot_sym
+    if not (mask3 & 1):
+        _rot_sym = False
+    if not (mask3 & 2):
+        _ver_sym = False
+    if not (mask3 & 4):
+        _hor_sym = False
+
+
+def set_comm_core_sym(sym3: int) -> None:
+    """Apply the core's symmetry verdict [solved:bit0 | type:bits1-2] (0=rot, 1=ver,
+    2=hor). When solved, lock symmetry to that type."""
+    global _hor_sym, _ver_sym, _rot_sym, _comm_core_sym3
+    _comm_core_sym3 = sym3
+    if sym3 & 1:                          # solved
+        typ = (sym3 >> 1) & 3
+        _rot_sym = (typ == 0)
+        _ver_sym = (typ == 1)
+        _hor_sym = (typ == 2)
+
+
+def _sym_evidence(flip_fn) -> int:
+    """# of seen tiles whose flip is also seen -- evidence weight for a symmetry
+    that has not been ruled out (all such pairs are consistent by definition)."""
+    w = _width
+    seen = _bm_seen
+    cnt = 0
+    m = seen
+    while m:
+        b = m & -m
+        m ^= b
+        n = b.bit_length() - 1
+        fp = flip_fn(Position(n % w, n // w))
+        if (seen >> (fp.x + fp.y * w)) & 1:
+            cnt += 1
+    return cnt
+
+
+def comm_core_sym3() -> int:
+    """The core's 3-bit symmetry word [solved | type]. solved iff exactly one type
+    is still possible; type = the most-evidenced possible type, tiebreak rot>ver>hor.
+    Cached on (seen set, possibility flags)."""
+    global _sym3_cache_key, _sym3_cache_val
+    key = (_bm_seen, _rot_sym, _ver_sym, _hor_sym)
+    if key == _sym3_cache_key:
+        return _sym3_cache_val
+    alive = []
+    if _rot_sym:
+        alive.append((0, rot_flip))
+    if _ver_sym:
+        alive.append((1, ver_flip))
+    if _hor_sym:
+        alive.append((2, hor_flip))
+    if not alive:
+        val = 0
+    else:
+        solved = 1 if len(alive) == 1 else 0
+        best_t, best_e = None, -1
+        for t, f in alive:
+            e = _sym_evidence(f)
+            if e > best_e or (e == best_e and (best_t is None or t < best_t)):
+                best_e, best_t = e, t
+        val = (solved & 1) | ((best_t & 3) << 1)
+    _sym3_cache_key = key
+    _sym3_cache_val = val
+    return val
+
+
+def set_comm_bots(friendly_claims, enemy_pos_ids) -> None:
+    """Fold globally-shared builder positions from comms into the bot masks (which
+    update() already built from local vision). Call after update() + comms.read(),
+    before recompute_derived(). friendly_claims: list[(Position, owner id mod 128)];
+    enemy_pos_ids: list[(Position, id mod 128)]."""
+    global _bm_friendly_bots, _bm_enemy_bots, _comm_enemy_ids
+    global _bm_friendly_tie_lose, _bm_friendly_tie_win
+    w = _width
+    my_n = _my_pos.x + _my_pos.y * w
+    my_r = _rc.get_id() & 127
+    # Collapse each friendly bot to ONE entry at its FRESHEST known tile, keyed by id
+    # (mod 128). Freshness rank: 2 = seen by me THIS turn, 1 = relayed claim (a bot's
+    # own position from last turn), 0 = remembered (my own, possibly very stale). A bot
+    # that moved must light one tile, not both its observed and its claimed tile.
+    fmerge = {}   # id -> (tile, rank)
+    for uid, tile in _bot_pos.items():
+        if _bot_team.get(uid) != _my_team_idx:
+            continue
+        fid = uid & 127
+        rank = 2 if uid in _seen_uids else 0
+        cur = fmerge.get(fid)
+        if cur is None or rank > cur[1]:
+            fmerge[fid] = (tile, rank)
+    unknown_tiles = []   # relayed claims whose owner id we don't know yet (fid == 0)
+    for cp, fid in friendly_claims:
+        tile = cp.x + cp.y * w
+        if not fid:
+            unknown_tiles.append(tile)
+            continue
+        cur = fmerge.get(fid)
+        if cur is None or cur[1] < 1:      # relay (rank 1) beats remembered, yields to seen-now
+            fmerge[fid] = (tile, 1)
+    _bm_friendly_bots = 0
+    tie_lose = 0
+    tie_win = 0
+    for fid, (tile, rank) in fmerge.items():
+        if tile == my_n:
+            continue
+        bit = 1 << tile
+        _bm_friendly_bots |= bit
+        # I win the tie if I OBSERVED them this turn (rank 2) or their id is higher;
+        # otherwise (global/stale info AND lower id) they win it.
+        if rank == 2 or fid > my_r:
+            tie_lose |= bit
+        else:
+            tie_win |= bit
+    for tile in unknown_tiles:             # unknown owner -> take ties (don't yield blindly)
+        if tile != my_n:
+            bit = 1 << tile
+            _bm_friendly_bots |= bit
+            tie_lose |= bit
+    tie_win &= ~tie_lose                    # lose (I win the tile) wins any tile overlap
+    _bm_friendly_tie_lose = tie_lose
+    _bm_friendly_tie_win = tie_win
+
+    # Dedupe enemies by id before building the mask. Two builders that each relayed
+    # the SAME enemy at different tiles (it moved between their sightings) would
+    # otherwise light two bits and look like two enemies. Build one id -> tile map,
+    # latest observation winning, then rebuild the mask from it:
+    #   base   -- what this unit knows locally (current + remembered), keyed mod 128
+    #   comm   -- relayed sightings (last turn), applied only for enemies this unit
+    #             does NOT see itself right now (a live local sighting is fresher)
+    emap = {}
+    for uid, tile in _bot_pos.items():
+        if _bot_team.get(uid) != _my_team_idx:
+            emap[uid & 127] = tile
+    for cp, eid in enemy_pos_ids:
+        if eid not in _seen_enemy_ids:
+            emap[eid] = cp.x + cp.y * w
+    _bm_enemy_bots = 0
+    ids = {}
+    for eid, n in emap.items():
+        if n == my_n:
+            continue
+        _bm_enemy_bots |= 1 << n
+        ids[n] = eid
+    _comm_enemy_ids = ids
 
 
 def note_symmetry_conflict(n: int, env_idx: int) -> None:
@@ -2013,7 +2171,7 @@ def update(recompute: bool = True) -> None:
     global _bm_seen, _bm_visible, _prev_pos, _nearby_tiles, _nearby_tiles_pos, _my_pos
     global _bm_friendly_bots, _bm_enemy_bots, _bm_friendly_stationary
     global _bm_others_5x5, _bm_others_3x3
-    global _max_id_seen
+    global _max_id_seen, _seen_enemy_ids, _seen_uids
     global _struct_version
     rc = _rc
     building_id = _building_id
@@ -2172,14 +2330,6 @@ def update(recompute: bool = True) -> None:
     _bm_friendly_bots = 0
     _bm_enemy_bots = 0
     _bm_friendly_stationary = 0
-    # Drop last turn's synthetic comm-store allies before the vision rebuild -- they
-    # are re-derived fresh by add_comm_allies() after comms.read(), so the loops below
-    # only ever see real, seen bots.
-    for uid in [u for u in _bot_pos if u >= _COMM_UID_BASE]:
-        cn = _bot_pos.pop(uid)
-        _bot_team.pop(uid, None)
-        if _bot_at.get(cn) == uid:
-            del _bot_at[cn]
     prev_pos = dict(_bot_pos)            # each real bot's BELIEVED tile at end of last turn
     seen_uids = set()
     cur_round = rc.get_current_round()
@@ -2238,6 +2388,11 @@ def update(recompute: bool = True) -> None:
         del _bot_team[uid]
         _bot_last_seen.pop(uid, None)
         _bot_pos_history.pop(uid, None)
+    # Enemy ids (mod 128) this unit sees for itself THIS turn -- these are the
+    # freshest observations, so set_comm_bots trusts them over any (last-turn)
+    # relayed sighting of the same enemy when deduping by id.
+    _seen_enemy_ids = {uid & 127 for uid in seen_uids if _bot_team.get(uid) != my_team_idx}
+    _seen_uids = seen_uids   # who I actually saw this turn (for the claim tiebreak)
 
     # Precompute other-bots zone masks for cant_claim().
     # expand_chebyshev distributes over OR, so one call per layer suffices.
@@ -2256,38 +2411,6 @@ def update(recompute: bool = True) -> None:
 
     if recompute:
         recompute_derived()
-
-
-def add_comm_allies(positions) -> None:
-    """Fold teammates broadcast on the global comm store into the friendly-bot masks
-    and tracking, so allies we cannot currently see are still treated as bots to route
-    around / not move onto. Call ONCE per turn, AFTER `comms.read()` and `update()`
-    (which drops the previous turn's synthetic entries first).
-
-    Each comm ally is tracked under a synthetic uid = _COMM_UID_BASE + tile -- it has
-    no real id -- so it is unique, never collides with a real bot, and being huge it
-    never counts as a "lower id" in chip's id-priority claim. A comm tile already held
-    by a real (vision) sighting is skipped; vision is authoritative. A comm ally counts
-    as parked (added to _bm_friendly_stationary) when a comm ally held the same tile
-    last turn."""
-    global _bm_friendly_bots, _bm_friendly_stationary, _bm_comm_prev
-    w = _width
-    my_n = _my_pos.x + _my_pos.y * w
-    occupied = _bm_friendly_bots | _bm_enemy_bots
-    comm = 0
-    for cp in positions:
-        n = cp.x + cp.y * w
-        b = 1 << n
-        if n == my_n or (occupied & b):
-            continue                            # myself, or a real sighting already here
-        comm |= b
-        uid = _COMM_UID_BASE + n
-        _bot_pos[uid] = n
-        _bot_team[uid] = _my_team_idx
-        _bot_at[n] = uid
-    _bm_friendly_bots |= comm
-    _bm_friendly_stationary |= comm & _bm_comm_prev   # same comm tile last turn -> parked
-    _bm_comm_prev = comm
 
 
 def is_tile_empty(pos: Position):

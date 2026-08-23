@@ -192,24 +192,99 @@ def _core_ward_dir(pos):
     return None
 
 
+_ADJ_COST_CAP = 8   # how far we BFS to compare which plan conveyor is closer to reach
+
+
+def _my_dist_field(cap: int) -> dict:
+    """tile index -> builder moves to reach that tile over passable ground, up to
+    `cap`. The builder's own tile is 0 even if passable() excludes it."""
+    w = map_info._width
+    my = map_info._my_pos
+    n0 = my.x + my.y * w
+    start = 1 << n0
+    passable = map_info.passable()
+    field = {n0: 0}
+    frontier = start
+    visited = start
+    for d in range(1, cap + 1):
+        frontier = map_info.expand_manhattan(frontier) & passable & ~visited
+        if not frontier:
+            break
+        visited |= frontier
+        m = frontier
+        while m:
+            b = m & -m
+            m ^= b
+            field[b.bit_length() - 1] = d
+    return field
+
+
+def _moves_to_build(field: dict, pos):
+    """Fewest builder moves in `field` to a tile from which `pos` can be built -- a
+    cardinal NEIGHBOUR of pos (you build from beside a tile, not on top of it). 0 if
+    a neighbour is already underfoot (adjacent now); standing directly ON pos costs
+    >=1 because its neighbours are a step away. None if no neighbour is within `cap`."""
+    w, h = map_info._width, map_info._height
+    best = None
+    for d in (Direction.NORTH, Direction.EAST, Direction.SOUTH, Direction.WEST):
+        nb = pos.add(d)
+        if 0 <= nb.x < w and 0 <= nb.y < h:
+            n = nb.x + nb.y * w
+            if n in field and (best is None or field[n] < best):
+                best = field[n]
+    return best
+
+
 def _plan_next_action():
-    """The next unbuilt piece of this builder's opening plan, in build order, or
-    None if the plan is complete (or this builder has none). Conveyors go down in
-    DFS order; the harvester next to a conveyor follows immediately once that
-    conveyor is up."""
+    """The next piece of this builder's opening plan to work on, or None if the plan
+    is complete (or this builder has none). Conveyors go down in DFS order (parent
+    before child, so each conveyor's output tile already exists); the harvester next
+    to a conveyor follows once that conveyor is up.
+
+    Conveyor choice: at any moment at most TWO conveyors are eligible -- the first
+    one not yet built (k), and the one immediately after it in the plan (k+1), the
+    latter only if it too is still unbuilt. We build whichever the builder can get
+    ADJACENT to in fewer moves (already adjacent = 0; standing directly on a tile is
+    >=1, since you must step off to build it), so we never walk back for an in-order
+    tile when the next one is already under our feet. We never build past k+1, so a
+    conveyor is at most one step ahead of the first gap."""
     plan = units.builder.conveyor_plan
     if not plan:
         return None
-    for pos, facing in plan.items():
-        if not _my_conveyor_at(pos):
-            # Skip a step the map no longer allows rather than returning it every
-            # turn and jamming the rest of the plan behind it.
-            if not rc.can_build_conveyor(pos, facing):
-                continue
+    items = list(plan.items())
+    n = len(items)
+    for i in range(n):
+        pos, facing = items[i]
+        if _my_conveyor_at(pos):
+            ore = _adjacent_ore_needing_harvester(pos)
+            if ore is not None:
+                return ("harvester", ore, pos)
+            continue
+        # items[i] is the first unbuilt conveyor (k). Its only companion candidate is
+        # items[i+1] (k+1), and only while that one is unbuilt too.
+        candidates = [(pos, facing)]
+        if i + 1 < n:
+            npos, nfacing = items[i + 1]
+            if not _my_conveyor_at(npos):
+                candidates.append((npos, nfacing))
+        if len(candidates) == 1:
             return ("conveyor", pos, facing)
-        ore = _adjacent_ore_needing_harvester(pos)
-        if ore is not None:
-            return ("harvester", ore, pos)
+        # Build whichever is cheaper to reach-and-build; ties keep k (the earlier one).
+        field = _my_dist_field(_ADJ_COST_CAP)
+        best = None
+        best_cost = None
+        for cpos, cfacing in candidates:
+            c = _moves_to_build(field, cpos)
+            if c is None:
+                continue
+            if best_cost is None or c < best_cost:
+                best_cost = c
+                best = (cpos, cfacing)
+        if best is None:
+            # Neither reachable within the cap (builder got pushed far off the line) --
+            # default to k and let _run_plan_action walk us back with full pathing.
+            return ("conveyor", pos, facing)
+        return ("conveyor", best[0], best[1])
     return None
 
 
@@ -334,7 +409,7 @@ def _run_plan_action(action, can_move=True) -> None:
         if rc.get_global_resources() >= need and rc.can_build_harvester(ore):
             rc.build_harvester(ore)
             map_info.update_at(ore)
-            comms.note_route_complete()
+            # route-tally removed; siege gates on predicted income now
         else:
             nav.move_to(conv, can_move=can_move)
 
@@ -376,9 +451,3 @@ def run(can_move=True):
         rc.build_conveyor(destroy, direction)
         map_info.update_at(destroy)
         built = True
-
-    # A conveyor built as the last hop (seg_dist == 1) connects the routed source
-    # to a route target, so a real route is completed this turn -- tally it. Both
-    # repair-tier and ordinary routing count (formerly route + route_repair both did).
-    if built and seg_dist == 1:
-        comms.note_route_complete()

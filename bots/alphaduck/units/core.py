@@ -14,6 +14,12 @@ rc: Controller
 
 # --- Configurable ---
 SCALE_MULT = 0.8
+# Core distress alarm fires when the core sees exactly ONE enemy builder bot AND at
+# least this many enemy sentinels can fire on the core -- a sentinel siege the core
+# needs every builder to come heal (heal returns MAX_SCORE, target = core).
+CORE_ALARM_SENTINELS = 2
+# The alarm also requires the core to actually be taking damage -- below this HP.
+CORE_ALARM_MAX_HP = 480
 # A builder bot sees tiles within this squared distance, so an ally within it of
 # the attacked tile can already respond -- no defensive spawn needed.
 BUILDER_VISION_SQ = GameConstants.BUILDER_BOT_VISION_RADIUS_SQ
@@ -70,7 +76,7 @@ def _spawn_best_toward(target: Position) -> bool:
                 best_tiles.append(p)
     if not best_tiles:
         return False
-    rc.spawn_builder(random.choice(best_tiles))
+    _register_spawned(rc.spawn_builder(random.choice(best_tiles)))
     return True
 
 
@@ -265,7 +271,7 @@ def _spawn_toward_adjacent(tile: Position) -> bool:
         visited |= frontier
     if best_spawn is None or not rc.can_spawn(best_spawn):
         return False
-    rc.spawn_builder(best_spawn)
+    _register_spawned(rc.spawn_builder(best_spawn))
     log(f"core spawned defender at {best_spawn} toward attacked {tile}")
     return True
 
@@ -605,7 +611,7 @@ def _spawn_starting_conv(r: int) -> bool:
     root, excluded_dir, adj = built
     if root not in _spawn_tiles or not rc.can_spawn(root):
         return False
-    rc.spawn_builder(root)
+    _register_spawned(rc.spawn_builder(root))
     budget = comms.core_plan_dfs_budget()
     dfs_bits = conveyor_plan.encode_dfs_bits(root, excluded_dir, adj, max_bits=budget)
     fit_nodes = budget // 3
@@ -617,12 +623,122 @@ def _spawn_starting_conv(r: int) -> bool:
     return True
 
 
+def _register_spawned(bid: int) -> None:
+    """Tell comms about a builder we just spawned so it can broadcast slot
+    ownership. Originals (spawned rounds 0-3) are recorded for the round-4 id word;
+    later builders get the next free slot pair announced next turn."""
+    if bid is None:
+        return
+    if rc.get_current_round() < comms._NUM_ORIGINAL:
+        comms.register_original(bid)
+    else:
+        comms.register_spawn(bid)
+
+
+def _predicted_income_raw() -> int:
+    """Sum over conveyors feeding the core of min(n, 4), where n = the number of
+    ti-source tiles within hops 0-3 upstream of that feeder (feeder itself = hop 0).
+    A ti source is a conveyor observed carrying ti (map_info._bm_conv_ti) OR a
+    harvester -- a harvester is treated exactly like a conveyor with a ti stack on
+    it. Harvesters feed conveyors (they sit orthogonally adjacent) but are leaves,
+    so they never extend the trace further."""
+    reverse = map_info._conv_reverse
+    team = map_info._my_team_idx
+    conv = map_info._bm_conveyors & map_info._bm_team[team]
+    harv = map_info._bm_et[map_info._IDX_HARVESTER] & map_info._bm_team[team]
+    src = map_info._bm_conv_ti | harv          # tiles that count as one ti stack
+    nrev = len(reverse)
+
+    def _feeders_of(mask):                     # conveyor feeders + adjacent harvesters
+        up = 0
+        m = mask
+        while m:
+            b = m & -m
+            m ^= b
+            tn = b.bit_length() - 1
+            if tn < nrev:
+                up |= reverse[tn]
+        return up & conv
+
+    # feeders: my conveyors whose output enters a core tile
+    feeders = _feeders_of(map_info._bm_my_core_area)
+    total = 0
+    fm = feeders
+    while fm:
+        fb = fm & -fm
+        fm ^= fb
+        window = fb                            # conveyors + harvesters seen so far
+        frontier = fb                          # only conveyors extend the trace
+        for _ in range(3):                     # hops 1-3 upstream
+            up_conv = _feeders_of(frontier) & ~window
+            up_harv = map_info.manhattan(frontier) & harv & ~window
+            new = up_conv | up_harv
+            if not new:
+                break
+            window |= new
+            frontier = up_conv                 # harvesters are leaves
+        total += min((window & src).bit_count(), 4)
+    return total & 0x7F
+
+
+def _core_alarm_condition() -> bool:
+    """True when the core is under a sentinel siege it needs help with: it sees EXACTLY
+    ONE enemy builder bot, and at least CORE_ALARM_SENTINELS enemy sentinels can fire
+    on the core, and the core is actually hurt (HP below CORE_ALARM_MAX_HP). (A single
+    enemy builder is manageable; the sustained sentinel fire is what needs every
+    builder to come heal the core.)"""
+    if rc.get_hp() >= CORE_ALARM_MAX_HP:
+        return False
+    if (map_info._bm_enemy_bots & map_info._bm_visible).bit_count() != 1:
+        return False
+    enemy = map_info._bm_team[1 - map_info._my_team_idx]
+    sentinels = map_info._bm_et[map_info._IDX_SENTINEL] & enemy
+    if not sentinels:
+        return False
+    w = map_info._width
+    core_tiles = list(map_info.iter_mask(map_info._bm_my_core_area))   # iter_mask yields Positions
+    if not core_tiles:
+        return False
+    hits = 0
+    m = sentinels
+    while m:
+        b = m & -m
+        m ^= b
+        n = b.bit_length() - 1
+        bid = map_info._building_id[n]
+        if bid is None:
+            continue
+        try:
+            d = rc.get_direction(bid)
+        except Exception:
+            continue
+        pos = Position(n % w, n // w)
+        if any(rc.can_fire_from(pos, d, EntityType.SENTINEL, ct) for ct in core_tiles):
+            hits += 1
+            if hits >= CORE_ALARM_SENTINELS:
+                return True
+    return False
+
+
 def run():
     global _spawn_tiles, _starting_convs, _fanout_dirs
 
     map_info.update()
     comms.read()    # absorb every slot's shared tiles/symmetry
     map_info.recompute_derived()
+
+    # Debug: green dot on every ally builder, red on every enemy -- both come from
+    # the global comm store, so the core dots (and prints) bots it cannot see itself.
+    # Enemies come from map_info's id-deduped set so a bot relayed at two tiles (it
+    # moved between two builders' sightings) shows as one enemy, matching the mask.
+    _w = map_info._width
+    for _p, _id in comms.friendly_bots():
+        rc.draw_indicator_dot(_p, 0, 255, 0)
+        print(f"ally ({_p.x},{_p.y},{_id})")
+    for _n, _id in map_info._comm_enemy_ids.items():
+        _p = Position(_n % _w, _n // _w)
+        rc.draw_indicator_dot(_p, 255, 0, 0)
+        print(f"enemy ({_p.x},{_p.y},{_id})")
 
     if rc.get_current_round() == 0:
         import time
@@ -652,7 +768,19 @@ def run():
     if r < num_groups:
         spawned_conv = _spawn_starting_conv(r)
 
-    comms.write()   # broadcast our word -- the queued plan if we spawned a root
+    # Predicted income: sum over conveyors feeding the core of min(n,4), n = ti
+    # stacks within hops 0-3 upstream. Broadcast the raw value (route_total reads
+    # it); print the *10/4 estimate.
+    _inc = _predicted_income_raw()
+    comms.set_income(_inc)
+    print(f"income {_inc * 10 / 4}")
+
+    # Core distress: exactly one enemy builder bot in view AND >= CORE_ALARM_SENTINELS
+    # enemy sentinels able to fire on the core -> raise the alarm so every builder
+    # drops what it's doing and comes to heal the core.
+    comms.set_core_alarm(_core_alarm_condition())
+
+    comms.write()   # broadcast our word (plan / ids / sym+income, by round)
 
     titanium = rc.get_global_resources()
 

@@ -55,7 +55,7 @@ def _my_claims() -> int:
     return pathing.claim_subset(my_mask, map_info._bm_friendly_bots, enemies, tie_self=False)
 
 
-MAX_SCORE = 4.5
+MAX_SCORE = 5.9
 _cached_target = None
 
 

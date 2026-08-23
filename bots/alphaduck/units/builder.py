@@ -237,22 +237,18 @@ def run():
     #     if current_round == 1:
     #         _stay_near_core = True
     map_info.update(recompute=False)
-    comms.read()          # absorb every slot's shared tiles/symmetry, broadcast our own
-    map_info.add_comm_allies(comms.ally_positions())   # out-of-vision teammates -> friendly masks
+    comms.read()          # START of turn: absorb every slot (folds global bots), heartbeat
     map_info.recompute_derived()
-    draw_mask(map_info._bm_enemy_bots, 255, 255, 255)
+    draw_mask(map_info._bm_route_targets, 255, 255, 255)
 
-    # First run only: decode the opening conveyor plan the core queued in slot 0
+    # First run only: decode the opening conveyor plan the core queued in slots 0/1
     # on the turn it spawned us (read here after comms.read() cached the slot).
     if not _plan_read:
         _plan_read = True
         _try_read_conveyor_plan()
-    # Hold the defender-spawn reserve only while something is actually at our
-    # door. A builder out on the map can't see the core, so it takes the sentry's
-    # alarm as the shared signal.
-    alarm = comms.read_alarm()
-    map_info.arm_reserve(bool(alarm and alarm[1] is not None)
-                         or bool(defense.threatening_enemies()))
+    # Hold the defender-spawn reserve only while something threatening is actually
+    # at our door (the sentry-alarm signal was removed with the launcher).
+    map_info.arm_reserve(bool(defense.threatening_enemies()))
     _update_harvest_zone()
 
     # First few builder bots derive explore target from spawn position

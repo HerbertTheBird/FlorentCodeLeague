@@ -47,6 +47,7 @@ N_BARRIER = 2
 _VIS_CAP = 18             # BFS cap for the healer-distance field
 _REGION_CAP = 80         # max defense-zone tiles we'll solve (keeps it within ~10ms)
 _CLAIM_RADIUS = 5        # BFS moves within which a parked (not-moving) teammate owns the chip spot
+_FREEKILL_MOVE_CAP = 20  # how far I'll BFS my own travel distance for free-kill validity
 
 _cached_valid = 0
 _cached_T = None                     # the winning tile score() validated as reachable
@@ -82,7 +83,7 @@ def _terrain():
         (map_info._bm_ti_carrying & ~map_info.conv_stuck) | harv)
     return {
         "w": map_info._width, "h": map_info._height,
-        "harv": harv, "board": board,
+        "harv": harv,
         "blockers": blockers,
         "passable": board & ~blockers,
         "empty": board & ~any_b & ~walls,               # truly empty (barrierable)
@@ -188,13 +189,15 @@ def _barrier_plan(codes, base_dmask, halfhp, barrierable, ctx, max_barriers=N_BA
 
 # ---- run-time target selection (standing on the tile, about to fire) ---------
 # These decide WHICH adjacent target to attack; validity already guaranteed a win
-# exists. Vision is used only to locate enemy BUILDER positions (a hidden builder
-# could be just outside vision); all terrain comes from persistent map_info.
+# exists. The healer set is exactly the known enemy builder bots (map_info._bm_enemy_bots
+# -- the global list, so it includes teammates' relayed sightings, not just our own
+# vision); all terrain comes from persistent map_info.
 def _healer_field(ctx):
-    """Multi-source GRAPH BFS over passable tiles from every known enemy builder AND
-    every non-visible passable tile. reached[k] = tiles within k healer-moves."""
+    """Multi-source GRAPH BFS over passable tiles from every known enemy builder bot.
+    reached[k] = tiles within k healer-moves. (Empty if we know of no enemy bots -> no
+    healer can reach anything -> every target is a free kill.)"""
     passable = ctx["passable"]
-    sources = ((ctx["board"] & ~map_info._bm_visible) & passable) | (map_info._bm_enemy_bots & passable)
+    sources = map_info._bm_enemy_bots & passable
     reached = [sources]
     cur = sources
     for _ in range(_VIS_CAP):
@@ -203,39 +206,42 @@ def _healer_field(ctx):
     return reached
 
 
-def _free_kill_target(reached, targets):
-    """A target A can destroy before any healer can heal it -- H < d + 2, where H is
-    hits-to-kill and d is the fastest healer's graph distance to a usable heal spot
-    (off-by-one: A kills on hit H; the healer's first heal is turn d+1, so A wins iff
-    H <= d+1). A target with no usable heal spot is always free. Position or None."""
+def _target_free(reached, t, mdist=0):
+    """True if I can destroy target `t` before the nearest healer can heal it, given I
+    still need `mdist` moves to reach the stand tile first. H = hits-to-kill, d = the
+    fastest healer's graph distance to a usable heal spot; I win iff H + mdist < d + 2
+    (off-by-one: my kill lands on turn mdist+H, the healer's first heal is turn d+1, so
+    I win iff mdist+H <= d+1). A target with no usable heal spot is always free."""
+    hm = t["heal_mask"]
+    if hm == 0:                                           # no usable heal spot: free
+        return True
+    H = (map_info._building_hp[t["n"]] + 1) // 2          # hits to kill
     ncap = len(reached)
-    free = []
-    for t in targets:
-        H = (map_info._building_hp[t["n"]] + 1) // 2      # hits to kill
-        hm = t["heal_mask"]
-        if hm == 0:                                       # no usable heal spot: free
-            free.append(t["pos"])
-            continue
-        d = ncap + 1
-        m = hm
-        while m:
-            lsb = m & -m
-            sn = lsb.bit_length() - 1
-            m ^= lsb
-            for k in range(ncap):
-                if (reached[k] >> sn) & 1:
-                    if k < d:
-                        d = k
-                    break
-        if H < d + 2:
-            free.append(t["pos"])
+    d = ncap + 1
+    m = hm
+    while m:
+        lsb = m & -m
+        sn = lsb.bit_length() - 1
+        m ^= lsb
+        for k in range(ncap):
+            if (reached[k] >> sn) & 1:
+                if k < d:
+                    d = k
+                break
+    return H + mdist < d + 2
+
+
+def _free_kill_target(reached, targets):
+    """Run-time (standing on the tile, mdist=0): a random adjacent target I can kill
+    before any healer reaches it, or None."""
+    free = [t["pos"] for t in targets if _target_free(reached, t, 0)]
     return random.choice(free) if free else None
 
 
 def _closest_healer(allspots, passable):
-    """(b0 tile, d0): nearest enemy builder / non-visible passable tile to the heal
-    spots. b0=-1 if none reachable within the cap."""
-    healer_src = (map_info._bm_enemy_bots | (map_info._board_mask & ~map_info._bm_visible)) & passable
+    """(b0 tile, d0): nearest known enemy builder bot to the heal spots. b0=-1 if none
+    reachable within the cap (or none known)."""
+    healer_src = map_info._bm_enemy_bots & passable
     frontier = allspots
     visited = allspots
     for d0 in range(0, 31):
@@ -305,8 +311,8 @@ def _solve_best_target(ctx, targets):
     if allspots == 0:
         return None
 
-    # Healer b0 = the closest enemy builder OR non-visible passable tile (a hidden
-    # builder could be just outside vision) to the heal spots -- and its distance d0.
+    # Healer b0 = the closest KNOWN enemy builder bot to the heal spots -- and its
+    # distance d0. (No guessing at hidden healers: we trust the global enemy-bot list.)
     b0, d0 = _closest_healer(allspots, passable)
     if b0 < 0:
         return None
@@ -377,6 +383,25 @@ def _stationary_claim_region(passable):
     return region
 
 
+def _my_dist_field(start_n: int, passable: int, cap: int) -> dict:
+    """tile index -> number of moves for ME to stand on it (BFS from start_n over
+    passable), up to `cap`. Tiles farther than cap are absent."""
+    out = {start_n: 0}
+    frontier = 1 << start_n
+    visited = frontier
+    for d in range(1, cap + 1):
+        frontier = map_info.expand_manhattan(frontier) & passable & ~visited
+        if not frontier:
+            break
+        visited |= frontier
+        m = frontier
+        while m:
+            lsb = m & -m
+            out[lsb.bit_length() - 1] = d
+            m ^= lsb
+    return out
+
+
 def valid_targets() -> int:
     global _plans
     ctx = _terrain()
@@ -405,21 +430,35 @@ def valid_targets() -> int:
     while afford < N_BARRIER and budget >= (afford + 1) * cost:
         afford += 1
 
-    # Barrier-win only -- the win certificate is a pure persistent building/barrier
-    # lookup, so the valid set never shifts as the builder moves. A tile is valid iff,
-    # placing up to `afford` barriers on empty 3x3 tiles, A is guaranteed to destroy a
-    # target vs an optimally-placed healer. (The "kill it before it can be healed"
-    # shortcut is a run-time attack choice, not a validity criterion.)
+    # Free-kill validity needs two board-scoped fields (computed once): where a healer
+    # can reach, and how many moves it takes ME to stand on each tile.
+    reached = _healer_field(ctx)
+    my = map_info._my_pos
+    distfield = _my_dist_field(my.x + my.y * w, ctx["passable"], _FREEKILL_MOVE_CAP)
+
+    # A stand tile is valid if EITHER:
+    #  (a) FREE KILL -- I can move onto it and kill an adjacent target before the
+    #      nearest enemy can reach a heal spot (H + my-travel < d + 2, see _target_free).
+    #      Position/enemy dependent, so this part of the valid set does shift as the
+    #      builder and enemies move; no barriers needed (plan = []).
+    #  (b) BARRIER WIN -- placing up to `afford` barriers on empty 3x3 tiles guarantees
+    #      a kill vs an optimally-placed healer (a pure persistent building lookup).
     valid = 0
     for T in map_info.iter_mask(possible):
-        codes, dmask, targets, barrierable = _classify(T, ctx)
+        tn = T.x + T.y * w
+        codes, dmask, targets, barrierable = _classify(T, ctx, want_heal=True)
         if not targets:                      # no live target adjacent
+            continue
+        mdist = distfield.get(tn)            # my moves to stand on T (None if beyond cap)
+        if mdist is not None and any(_target_free(reached, t, mdist) for t in targets):
+            valid |= 1 << tn
+            _plans[tn] = []                  # race, not a build -- just go kill it
             continue
         halfhp = [t["halfhp"] for t in targets]
         bp = _barrier_plan(codes, dmask, halfhp, barrierable, ctx, afford)
         if bp is not None:
-            valid |= 1 << (T.x + T.y * w)
-            _plans[T.x + T.y * w] = [d[2] for d in bp]   # barrier positions to place
+            valid |= 1 << tn
+            _plans[tn] = [d[2] for d in bp]  # barrier positions to place
     return valid
 
 

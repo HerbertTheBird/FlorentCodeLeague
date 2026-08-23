@@ -16,8 +16,9 @@ weight (HP as sub-tiebreak).
 """
 
 from main import has_op
-from fcode import EntityType, Position
+from fcode import EntityType, Position, Direction
 import map_info
+import comms
 from log import DEBUG_LOGGING, log
 import random
 
@@ -277,6 +278,50 @@ def select_best(candidates, priority_sets, nav, one_shot_hp: int,
     return None
 
 
+def _can_hit_enemy_core(rc) -> bool:
+    """True if the enemy core sits in this turret's attack pattern -- for a gunner
+    (which rotates) from ANY of the 8 facings, for a non-rotating turret only from its
+    current facing. Reads the observed enemy core (map_info._bm_their_core_area)."""
+    core = map_info._bm_their_core_area
+    if not core:
+        return False
+    pos = rc.get_position()
+    etype = rc.get_entity_type()
+    w = map_info._width
+    dirs = map_info._DIRECTIONS if etype == EntityType.GUNNER else (rc.get_direction(),)
+    for d in dirs:
+        if d == Direction.CENTRE:
+            continue
+        for p in rc.get_attackable_tiles_from(pos, d, etype):
+            if (core >> (p.x + p.y * w)) & 1:
+                return True
+    return False
+
+
+def should_hold_fire(rc, target_pos) -> bool:
+    """Conserve ammo: hold fire when the core's broadcast income is <= 1 (0 or 1 -- we
+    are barely generating any resources), an enemy builder bot is in sight, and the
+    shot would be wasted -- the target is at FULL HP (an adjacent enemy builder just
+    heals it back) or is the enemy CORE (a huge HP pool we can't meaningfully dent).
+    Applies to both gunner and sentinel. `target_pos` is the tile we'd fire at. Only
+    kicks in after turn 100 -- early game we always shoot."""
+    if rc.get_current_round() <= 100:
+        return False
+    if comms.core_income() > 1:
+        return False
+    if not map_info._bm_enemy_bots:
+        return False
+    bot_id = rc.get_tile_builder_bot_id(target_pos)
+    if bot_id is not None:
+        return rc.get_hp(bot_id) >= rc.get_max_hp(bot_id)      # full-HP bot
+    bid = rc.get_tile_building_id(target_pos)
+    if bid is None:
+        return False
+    if rc.get_entity_type(bid) == EntityType.CORE:
+        return True                                           # the enemy core
+    return rc.get_hp(bid) >= rc.get_max_hp(bid)               # full-HP building
+
+
 def scrap_if_idle(rc) -> bool:
     """Self-destruct a turret that has become dead weight: the caller has nothing
     to shoot this turn, and the turret sees no enemy bots and at most 2 enemy
@@ -285,8 +330,14 @@ def scrap_if_idle(rc) -> bool:
 
     'Sees' means the turret's current vision: enemy bots via map_info tracking,
     enemy buildings via the controller's nearby-building list (distinct entities,
-    so a 2x2 enemy core counts once)."""
+    so a 2x2 enemy core counts once).
+
+    Exception: never scrap a turret that can hit the enemy core -- it's a siege
+    piece worth keeping even while idle (e.g. the siege gate has the core un-scored,
+    so it reads as having nothing to shoot)."""
     if map_info._bm_enemy_bots:
+        return False
+    if _can_hit_enemy_core(rc):
         return False
     rc.self_destruct()
     return True

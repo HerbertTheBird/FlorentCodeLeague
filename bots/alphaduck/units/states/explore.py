@@ -71,25 +71,20 @@ def generate_explore_target():
             explore_target = pos
             return
     passable = ~avoid & map_info._board_mask
-
-    # Flood ONLY from my own position, so every tile the fill reaches is reachable
-    # BY ME. The old code also seeded every other friendly builder (and interpolated
-    # waypoints toward them) to push the frontier away from the crew; the side
-    # effect was that the chosen ring could lie in a component only *they* could
-    # reach, and the bot then targeted a tile it could never walk to -- builders
-    # froze in place for hundreds of turns.
     my_pos = map_info._my_pos
     my_n = my_pos.x + my_pos.y * w
-    seeds = 1 << my_n
+
+    # Seed the ring flood from my tile AND every teammate builder, so the frontier is
+    # pushed out past the whole crew and we spread over the map rather than clustering.
+    seeds = (1 << my_n) | map_info._bm_friendly_bots
 
     # Keep the trailing 6 frontiers so we can recover the ring at iteration (c-5) once the fill terminates.
     visited = seeds
     frontier = seeds
-    recent_frontiers = deque([seeds], maxlen=6)
+    recent_frontiers = deque([seeds], maxlen=3)
     c = 0
-    while frontier and c < 100:
-        h = frontier | ((frontier & nrc) << 1) | ((frontier & nlc) >> 1)
-        expanded = h | (h << w) | (h >> w)
+    while frontier and c < 1000:
+        expanded = frontier | ((frontier & nrc) << 1) | ((frontier & nlc) >> 1) | (frontier << w) | (frontier >> w)
         frontier = expanded & passable & ~visited
         visited |= frontier
         c += 1
@@ -100,6 +95,8 @@ def generate_explore_target():
         # than a uniform random board tile, which was frequently a wall or sat in
         # a sealed-off region -- an unreachable walk target.
         explore_target = _random_tile(visited & ~seeds) or my_pos
+    for i in range(len(recent_frontiers)):
+        units.builder.draw_mask(recent_frontiers[i], 255, (i*32)%256, 0)
 
 
 def run(can_move=True):

@@ -10,6 +10,7 @@ from fcode import Controller, EntityType, Team
 import random
 import rng
 import sys
+import time
 from types import ModuleType
 
 import units.builder as builder
@@ -59,7 +60,9 @@ class Player:
                 self.spawn_turn = round_num
                 self.initialized = True
 
+            _t0 = time.perf_counter_ns()
             self.me.run()
+            print(f"turn {round_num} took {(time.perf_counter_ns() - _t0) // 1000} us")
 
 
         except Exception as e:

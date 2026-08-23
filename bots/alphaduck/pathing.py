@@ -30,41 +30,49 @@ _FULL_COVER_OFFSETS = [
 
 
 
-_base_claim_cache_key = None
-_base_claim_cache_value = (0, 0)
-
-def voronoi_claim(my_mask, others_mask, claims, passable=None):
+def voronoi_claim_tiebreak(my_mask, lose_mask, win_mask, claims, passable=None):
+    """Voronoi partition of `claims` for ME against other friendly bots, with a
+    per-competitor equal-distance tie rule: at EQUAL distance I beat everyone in
+    `lose_mask` (I take the tile) but lose to everyone in `win_mask` (they take it).
+    lose_mask | win_mask is the full set of other bots. Returns my claimed subset."""
     if not claims:
         return 0
-    if not others_mask:
-        return claims
+    if not (lose_mask or win_mask):
+        return claims                       # no competitors -> everything is mine
     if passable is None:
         passable = map_info.passable()
-
-    my_front = my_mask
-    other_front = others_mask
-    my_claims = 0
-    all_claimed = my_front | other_front
-
-    # Inlined expand_manhattan (4-neighbour — movement is cardinal-only)
     w = map_info._width
     nlc = map_info._not_left_col
     nrc = map_info._not_right_col
-    while claims and (my_front or other_front):
+    my_front = my_mask
+    lose_front = lose_mask
+    win_front = win_mask
+    my_claims = 0
+    all_claimed = my_front | lose_front | win_front
+    while claims and (my_front or lose_front or win_front):
+        # 1) win-group takes equal-distance tiles BEFORE me -> they win ties vs me
+        if win_front:
+            claims &= ~(map_info.manhattan(win_front) & claims)
+        # 2) I take what's left this layer -> I beat lose-group on ties
+        if my_front and claims:
+            got = map_info.manhattan(my_front) & claims
+            my_claims |= got
+            claims &= ~got
+        # 3) lose-group only takes tiles strictly closer to it than to me
+        if lose_front and claims:
+            claims &= ~(map_info.manhattan(lose_front) & claims)
         if my_front:
-            my_claims |= map_info.manhattan(my_front) & claims
-            claims &= ~my_claims
-            my_expand = ((my_front | ((my_front & nrc) << 1) | ((my_front & nlc) >> 1) | (my_front << w) | (my_front >> w))) & passable & ~all_claimed
-            all_claimed |= my_expand
-            my_front = my_expand
-        if not claims:
-            break
-        if other_front:
-            claims &= ~(map_info.manhattan(other_front) & claims)
-            other_expand = ((other_front | ((other_front & nrc) << 1) | ((other_front & nlc) >> 1) | (other_front << w) | (other_front >> w))) & passable & ~all_claimed
-            all_claimed |= other_expand
-            other_front = other_expand
-
+            e = (my_front | ((my_front & nrc) << 1) | ((my_front & nlc) >> 1) | (my_front << w) | (my_front >> w)) & passable & ~all_claimed
+            all_claimed |= e
+            my_front = e
+        if win_front:
+            e = (win_front | ((win_front & nrc) << 1) | ((win_front & nlc) >> 1) | (win_front << w) | (win_front >> w)) & passable & ~all_claimed
+            all_claimed |= e
+            win_front = e
+        if lose_front:
+            e = (lose_front | ((lose_front & nrc) << 1) | ((lose_front & nlc) >> 1) | (lose_front << w) | (lose_front >> w)) & passable & ~all_claimed
+            all_claimed |= e
+            lose_front = e
     return my_claims
 
 
@@ -75,20 +83,18 @@ def claim_subset(
     passable: int | None = None,
     tie_self: bool = True,
 ) -> int:
-    """Exact wrapper around `voronoi_claim` with a cached fast path.
-
-    If all claims are already passable on the base graph, we can reuse a shared
-    territorial partition for the current builder turn. If any blocked claim is
-    present, we fall back to the original exact computation because blocked
-    claims become traversable corridors in `voronoi_claim`.
-    """
+    """Voronoi-partition `claims` between me (`my_mask`) and the other friendly bots
+    in `others_mask`, using the per-bot equal-distance tie rule from map_info: I take
+    a tied tile unless the competitor is one I only know globally/staler AND has a
+    lower id (then it takes it). `tie_self` is retained for signature compatibility but
+    no longer used -- the id/observed rule supersedes the old blanket tie direction."""
     if not claims:
         return 0
     if passable is None:
         passable = map_info.passable()
-    if tie_self:
-        return voronoi_claim(my_mask, others_mask, claims, passable)
-    return claims & ~voronoi_claim(others_mask, my_mask, claims, passable) & ~others_mask
+    lose = others_mask & map_info._bm_friendly_tie_lose
+    win = others_mask & map_info._bm_friendly_tie_win
+    return voronoi_claim_tiebreak(my_mask, lose, win, claims, passable)
 
 class Pathing:
     width = height = 0
