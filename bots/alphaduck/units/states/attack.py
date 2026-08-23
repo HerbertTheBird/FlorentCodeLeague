@@ -1108,7 +1108,7 @@ SIEGE_MIN_HARVESTERS = 2
 def score(can_move=True):
     global SENTINEL_CORE_SCORE
 
-    if map_info._bm_enemy_bots.bit_count() <= 1 and (map_info._bm_team[1 - map_info._my_team_idx]&map_info._bm_et[map_info._IDX_HARVESTER]).bit_count() == 0:
+    if map_info.enemy_undeveloped():
         SENTINEL_CORE_SCORE = 32
         SENTINEL_BUILDING_SCORE[map_info._IDX_CORE] = SENTINEL_CORE_SCORE
     else:

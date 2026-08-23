@@ -39,6 +39,10 @@ _cached_target = None
 def score(can_move=True):
     global _cached_target
     _cached_target = None
+    # While the enemy is undeveloped we're rushing their core -- don't peel builders
+    # off to harass a bot with no economy worth disrupting.
+    if map_info.enemy_undeveloped():
+        return 0
     # Can't afford a barrier (+ the defender reserve) -> don't select the state.
     if rc.get_global_resources() < rc.get_barrier_cost() + map_info.ti_reserve():
         return 0

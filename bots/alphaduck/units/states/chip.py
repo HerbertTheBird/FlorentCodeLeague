@@ -466,8 +466,13 @@ def valid_targets() -> int:
 # ---- state API ---------------------------------------------------------------
 def score(can_move=True):
     global _cached_valid, _cached_T
-    _cached_valid = valid_targets()
     _cached_T = None
+    # While the enemy is undeveloped we're rushing their core -- don't peel builders
+    # off to harass a bot with no economy worth chipping.
+    if map_info.enemy_undeveloped():
+        _cached_valid = 0
+        return 0
+    _cached_valid = valid_targets()
     if not _cached_valid:
         return 0
     my = map_info._my_pos

@@ -14,12 +14,13 @@ rc: Controller
 
 # --- Configurable ---
 SCALE_MULT = 0.8
-# Core distress alarm fires when the core sees exactly ONE enemy builder bot AND at
+# Core distress alarm fires in the early game (round < CORE_ALARM_MAX_ROUND) when
+# exactly ONE enemy builder bot is known ANYWHERE (tracked, not just in view) AND at
 # least this many enemy sentinels can fire on the core -- a sentinel siege the core
 # needs every builder to come heal (heal returns MAX_SCORE, target = core).
-CORE_ALARM_SENTINELS = 2
-# The alarm also requires the core to actually be taking damage -- below this HP.
-CORE_ALARM_MAX_HP = 480
+CORE_ALARM_SENTINELS = 1
+# Only during the early game -- past this round a sieged core is a different problem.
+CORE_ALARM_MAX_ROUND = 100
 # A builder bot sees tiles within this squared distance, so an ally within it of
 # the attacked tile can already respond -- no defensive spawn needed.
 BUILDER_VISION_SQ = GameConstants.BUILDER_BOT_VISION_RADIUS_SQ
@@ -682,14 +683,14 @@ def _predicted_income_raw() -> int:
 
 
 def _core_alarm_condition() -> bool:
-    """True when the core is under a sentinel siege it needs help with: it sees EXACTLY
-    ONE enemy builder bot, and at least CORE_ALARM_SENTINELS enemy sentinels can fire
-    on the core, and the core is actually hurt (HP below CORE_ALARM_MAX_HP). (A single
-    enemy builder is manageable; the sustained sentinel fire is what needs every
-    builder to come heal the core.)"""
-    if rc.get_hp() >= CORE_ALARM_MAX_HP:
+    """True when the core is under a sentinel siege it needs help with: it's still the
+    early game (round < CORE_ALARM_MAX_ROUND), exactly ONE enemy builder bot is known
+    anywhere (tracked, not just currently in view), and at least CORE_ALARM_SENTINELS
+    enemy sentinels can fire on the core. (A single enemy builder is manageable; the
+    sustained sentinel fire is what needs every builder to come heal the core.)"""
+    if rc.get_current_round() >= CORE_ALARM_MAX_ROUND:
         return False
-    if (map_info._bm_enemy_bots & map_info._bm_visible).bit_count() != 1:
+    if map_info._bm_enemy_bots.bit_count() != 1:
         return False
     enemy = map_info._bm_team[1 - map_info._my_team_idx]
     sentinels = map_info._bm_et[map_info._IDX_SENTINEL] & enemy
@@ -775,9 +776,9 @@ def run():
     comms.set_income(_inc)
     print(f"income {_inc * 10 / 4}")
 
-    # Core distress: exactly one enemy builder bot in view AND >= CORE_ALARM_SENTINELS
-    # enemy sentinels able to fire on the core -> raise the alarm so every builder
-    # drops what it's doing and comes to heal the core.
+    # Core distress: early game, exactly one enemy builder bot known anywhere AND
+    # >= CORE_ALARM_SENTINELS enemy sentinels able to fire on the core -> raise the
+    # alarm so every builder drops what it's doing and comes to heal the core.
     comms.set_core_alarm(_core_alarm_condition())
 
     comms.write()   # broadcast our word (plan / ids / sym+income, by round)

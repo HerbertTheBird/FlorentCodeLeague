@@ -132,6 +132,10 @@ def score(can_move=True):
     global _cached_target, _cached_walk
     _cached_target = None
     _cached_walk = None
+    # While the enemy is undeveloped we're rushing their core -- don't peel builders
+    # off to barrier-block a bot with no economy worth choking.
+    if map_info.enemy_undeveloped():
+        return 0
     resources = rc.get_global_resources()
     barrier_cost = rc.get_barrier_cost()
     # Tier A (drop a barrier on an ALREADY-adjacent choke) IGNORES the ti reserve --

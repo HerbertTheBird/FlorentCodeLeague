@@ -860,6 +860,18 @@ def end_cost_exempt_conveyors() -> int:
     return _bm_conveyors & _bm_team[_my_team_idx] & ~conv_load_buckets[3]
 
 
+def enemy_undeveloped() -> bool:
+    """True while the enemy has almost nothing: at most ONE known enemy builder bot
+    and FEWER THAN TWO enemy harvesters. This is the gate that turns the aggressive
+    sentinel-vs-enemy-core rush ON (attack) -- and, while it's on, keeps the
+    harassment states (block/disrupt/chip) OFF, so builders stay on the rush and our
+    own economy instead of poking a bot that has no economy worth disrupting."""
+    if _bm_enemy_bots.bit_count() > 1:
+        return False
+    enemy = _bm_team[1 - _my_team_idx]
+    return (_bm_et[_IDX_HARVESTER] & enemy).bit_count() < 2
+
+
 def update_at(pos: Position) -> None:
     """Re-scan a single tile from the controller and update all per-tile state.
 

@@ -1,5 +1,5 @@
 # 1.0 for full cost, lower = discounted cost to more proactively start routes
-CONVEYOR_COST_DISCOUNT = 0.65
+CONVEYOR_COST_DISCOUNT = 0.9
 
 # --- pay as you go ------------------------------------------------------------
 # How many conveyor hops harvest and route quote up front. Quoting the *entire*
