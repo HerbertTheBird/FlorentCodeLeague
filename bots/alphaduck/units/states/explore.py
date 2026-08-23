@@ -122,7 +122,7 @@ def run(can_move=True):
     attempts = 0
     moved = False
     while attempts < MOVE_ATTEMPTS:
-        if not nav.move_to(explore_target):
+        if not nav.move_to(explore_target, hard_avoid_turret=True):
             generate_explore_target()
         else:
             moved = True
@@ -145,8 +145,11 @@ def _step_anywhere():
     the new tile."""
     die = map_info.lethal_mask(rc.get_hp())
     n = map_info._my_pos.x + map_info._my_pos.y * map_info._width
+    # Explore hard-avoids turret threat even on this last-resort step -- never stray
+    # into fire just to unstick.
     ok = (map_info.passable()
           & ~die
+          & ~map_info._bm_enemy_turret_threat
           & ~map_info._bm_friendly_bots
           & ~map_info._bm_enemy_bots
           & ~(1 << n))

@@ -132,10 +132,13 @@ def score(can_move=True):
     global _cached_target, _cached_walk
     _cached_target = None
     _cached_walk = None
-    # Must be able to actually afford the barrier (cost + defender reserve) -- the
-    # same gate run() places under -- or a positive score just parks a builder that
-    # can never build.
-    if rc.get_global_resources() < rc.get_barrier_cost() + map_info.ti_reserve():
+    resources = rc.get_global_resources()
+    barrier_cost = rc.get_barrier_cost()
+    # Tier A (drop a barrier on an ALREADY-adjacent choke) IGNORES the ti reserve --
+    # a choke we can plug right now is worth dipping into the reserve for. Tier B
+    # (walking to a choke) still respects it. Either way we must at least afford the
+    # barrier itself, or a positive score just parks a builder that can never build.
+    if resources < barrier_cost:
         return 0
     choke = _block_tiles()
     if not choke:
@@ -147,7 +150,7 @@ def score(can_move=True):
         _cached_target = adj
         return MAX_SCORE
 
-    if not can_move:
+    if not can_move or resources < barrier_cost + map_info.ti_reserve():
         return 0
 
     # Tier B: walk to a choke I can be adjacent to no later than the nearest enemy.
@@ -187,8 +190,8 @@ def run(can_move=True):
     if _cached_target is not None:
         p = _cached_target
         log("BLOCK")
-        if (rc.can_build_barrier(p)
-                and rc.get_global_resources() >= rc.get_barrier_cost() + map_info.ti_reserve()):
+        # Tier A ignores the ti reserve (matches score()).
+        if rc.can_build_barrier(p) and rc.get_global_resources() >= rc.get_barrier_cost():
             rc.build_barrier(p)
             map_info.update_at(p)
         return

@@ -157,7 +157,7 @@ _width = _height = 0
 # Holding it unconditionally (rather than only while a threat is live) measured
 # better on both opponents tested — an on-demand version cost ~10 points against
 # Khaos and gained nothing against Heimdall v3 — so this stays simple.
-TI_RESERVE_CAP = 10
+TI_RESERVE_CAP = 30
 # Tried and rejected: scaling the reserve to current titanium
 # (min(cap, resources/3)) so it could never freeze construction when poor. The
 # reasoning looked sound — ladder replays show antler games where we sit at
@@ -222,10 +222,10 @@ _bm_ti_carrying: int = 0       # conveyors believed to carry titanium (within 3 
 # ti) -- the gap it sits in. 0.0 where undefined (no conveyor, or no downstream
 # ti reference). Rebuilt by `_compute_conv_load()` off the conv_target chain.
 conv_load: list[float] = []
-# The same load split into four bitmask buckets by quartile, so callers can score
-# it with bit ops instead of looping. Index k-1 holds the conveyors whose load
-# rounds up into quartile k: [0]=(0,1/4], [1]=(1/4,1/2], [2]=(1/2,3/4], [3]=(3/4,1].
-# Load 0 is in no bucket. Bucket k == ceil(load*4).
+# The same load split into four bitmask buckets by exact ti spacing, so callers can
+# score it with bit ops instead of looping. Bucketed by `dist` (hops between ti):
+# [3]=dist 1 (densest, back-to-back ti), [2]=dist 2, [1]=dist 3, [0]=dist >= 4 (any
+# sparser but still real ti reference). Load 0 (no ti reference) is in no bucket.
 conv_load_buckets: list[int] = [0, 0, 0, 0]
 # Conveyors whose titanium is jammed (not physically moving). A visible conveyor
 # is "base-stuck" when the resource-stack id sitting on it hasn't changed for long
@@ -2056,7 +2056,17 @@ def _compute_conv_load() -> None:
             dist = a + b                 # empty tile: full gap it sits in
         if 0 < dist < INF:
             conv_load[n] = 1.0 / dist
-            bucket = -(-4 // dist)       # ceil(4 / dist) == ceil(load * 4), 1..4
+            # Bucket by exact spacing so all four tiers are reachable: dist 1 is the
+            # densest (bucket 4), 2 -> 3, 3 -> 2, and any greater spacing (still a
+            # real ti reference) falls in bucket 1.
+            if dist == 1:
+                bucket = 4
+            elif dist == 2:
+                bucket = 3
+            elif dist == 3:
+                bucket = 2
+            else:
+                bucket = 1
             conv_load_buckets[bucket - 1] |= 1 << n
 
 

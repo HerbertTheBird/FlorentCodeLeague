@@ -60,7 +60,7 @@ def run(can_move=True):
 
     # Move into position first (a no-op if we're already adjacent and safe, a
     # forced step off our tile if it's lethal); only build if we didn't move.
-    if nav.move_adjacent(best, can_move=can_move):
+    if nav.move_adjacent(best, can_move=can_move, hard_avoid_turret=True):
         return
     if rc.can_build_barrier(best) and rc.get_global_resources() >= rc.get_barrier_cost() + map_info.ti_reserve():
         rc.build_barrier(best)

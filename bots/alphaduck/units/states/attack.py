@@ -79,7 +79,7 @@ GUNNER_BUILDING_SCORE[map_info._IDX_GUNNER] = 64
 # 7-damage shots it needs to answer.
 GUNNER_BUILDING_SCORE[map_info._IDX_SENTINEL] = 128
 GUNNER_BUILDING_SCORE[map_info._IDX_LAUNCHER] = 24
-GUNNER_BUILDING_SCORE[map_info._IDX_CONVEYOR] = 0
+GUNNER_BUILDING_SCORE[map_info._IDX_CONVEYOR] = 8
 GUNNER_BUILDING_SCORE[map_info._IDX_BARRIER] = 26
 GUNNER_BUILDING_SCORE[map_info._IDX_SPLITTER] = GUNNER_BUILDING_SCORE[map_info._IDX_CONVEYOR]
 
@@ -140,7 +140,7 @@ MIN_INCREASE_PER_TURN = 4
 # (top quartile) is worth the full increase; a 3/4-loaded belt 3/4 of it; etc.
 # Makes turrets prefer cutting the enemy's live supply over idle infrastructure.
 # Values are a starting point -- tune freely.
-TI_SCORE_INCREASE_GUNNER = 20
+TI_SCORE_INCREASE_GUNNER = 36
 TI_SCORE_INCREASE_SENTINEL = 20
 
 # Gunner-only knobs. Distance discount: the enemy on the tile directly in front
@@ -774,6 +774,7 @@ def get_best_direction(pos):
             best_g_dirs = [directions[d]]
         elif s == best_g_score:
             best_g_dirs.append(directions[d])
+        # print(f"get_best_direction: pos={pos}, d={directions[d]}, score={s}, best_g_score={best_g_score}")
     if best_g_dirs:
         best_g_dir = random.choice(best_g_dirs)
 
@@ -1105,6 +1106,14 @@ SIEGE_OPEN_ROUND = 150
 SIEGE_MIN_HARVESTERS = 2
 
 def score(can_move=True):
+    global SENTINEL_CORE_SCORE
+
+    if map_info._bm_enemy_bots.bit_count() <= 1 and (map_info._bm_team[1 - map_info._my_team_idx]&map_info._bm_et[map_info._IDX_HARVESTER]).bit_count() == 0:
+        SENTINEL_CORE_SCORE = 32
+        SENTINEL_BUILDING_SCORE[map_info._IDX_CORE] = SENTINEL_CORE_SCORE
+    else:
+        SENTINEL_CORE_SCORE = 0
+        SENTINEL_BUILDING_SCORE[map_info._IDX_CORE] = SENTINEL_CORE_SCORE
     global _SENT_CORE_BITS, _GUN_CORE_BITS_BY_STEP
     core = map_info._IDX_CORE
     # Siege the enemy core only once we have at least 2 COMPLETE routes -- real

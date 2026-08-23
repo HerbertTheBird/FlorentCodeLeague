@@ -419,13 +419,14 @@ def valid_targets() -> int:
         return 0
 
     # How many barriers we can pay for THIS turn (0..N_BARRIER). Barrier cost scales,
-    # so this uses the current cost as a floor: afford N when the balance left after
-    # the ti reserve covers N of them. Plans needing more than this are never
-    # certified, so chip won't commit to a stand tile it can't finish. Already-placed
-    # barriers read as walls in _classify, so a plan shrinks as it is built and this
-    # keeps tracking only the REMAINING barriers.
+    # so this uses the current cost as a floor: afford N when the balance covers N of
+    # them. Chip IGNORES the ti reserve -- pinning/killing an enemy is worth dipping
+    # into it. Plans needing more than this are never certified, so chip won't commit
+    # to a stand tile it can't finish. Already-placed barriers read as walls in
+    # _classify, so a plan shrinks as it is built and this keeps tracking only the
+    # REMAINING barriers.
     cost = rc.get_barrier_cost()
-    budget = rc.get_global_resources() - map_info.ti_reserve()
+    budget = rc.get_global_resources()
     afford = 0
     while afford < N_BARRIER and budget >= (afford + 1) * cost:
         afford += 1
@@ -519,7 +520,7 @@ def run(can_move=True):
             bt = remaining[0]
         if nav.move_adjacent(bt):            # not yet adjacent -> keep moving
             return
-        need = rc.get_barrier_cost() + map_info.ti_reserve()
+        need = rc.get_barrier_cost()        # chip ignores the ti reserve
         if rc.get_global_resources() >= need and rc.can_build_barrier(bt):
             rc.build_barrier(bt)
             map_info.update_at(bt)

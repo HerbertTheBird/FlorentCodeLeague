@@ -103,7 +103,13 @@ def _my_claims(repair=False):
     my_mask = 1 << (my_pos.x + my_pos.y * map_info._width)
 
     # Routable conveyors whose output is not connected to my ore-accepting network.
-    candidates = map_info._bm_dead_end & ~map_info._bm_enemy_turret_threat
+    # We normally steer clear of enemy turret threat, but a dead end ADJACENT to a
+    # route target (one hop from the accepting network -- a conveyor whose chain
+    # already reaches the core, or the core itself) is exempt: finishing that last
+    # connection into the network is worth building into the threat zone.
+    adj_route = map_info.expand_manhattan(
+        map_info._bm_route_targets | map_info._bm_my_core_area)
+    candidates = map_info._bm_dead_end & (~map_info._bm_enemy_turret_threat | adj_route)
 
     # Orphaned harvesters, masked to my team. Was unmasked, so ENEMY harvesters
     # entered route's candidate set -- and route (5) outranks harvest (4), heal
@@ -120,8 +126,7 @@ def _my_claims(repair=False):
         # cardinally adjacent to a valid route target (a conveyor whose chain
         # already reaches the core, or the core itself). Scores at the higher
         # repair tier (formerly the separate route_repair state).
-        valid_route_targets = map_info._bm_route_targets | map_info._bm_my_core_area
-        candidates &= map_info.expand_manhattan(valid_route_targets)
+        candidates &= adj_route
 
     if units.builder._stay_near_core:
         candidates &= units.builder.near_core_mask()
@@ -140,6 +145,7 @@ def _my_claims(repair=False):
 
 _cached_target = None        # (destroy, nxt, seg_dist) picked+validated in score()
 _cached_plan_action = None   # ("conveyor", pos, facing) | ("harvester", ore) | None
+_is_repair = False           # was _cached_target the REPAIR (max-score) tier target?
 
 
 # --- Opening conveyor plan (handed to us by the core in comms slot 0, decoded
@@ -350,23 +356,30 @@ def _adjacent_to_me(pos) -> bool:
 
 # Folds in the former route_repair state: a repair-quality target (a candidate one
 # hop from the network) scores REPAIR_SCORE; the opening plan and ordinary dead-end
-# routing score NORMAL_SCORE. MAX_SCORE is the higher of the two so the selection
+# routing score NORMAL_SCORE. When a repair target is ALREADY adjacent (buildable
+# this turn) it jumps to ADJ_REPAIR_SCORE -- above attack (9), so an immediate econ
+# reconnect isn't preempted by a fight. MAX_SCORE is the highest so the selection
 # loop's early-break stays correct.
 NORMAL_SCORE = 5
 REPAIR_SCORE = 8
-MAX_SCORE = 8
+ADJ_REPAIR_SCORE = 9.2
+MAX_SCORE = 9.2
 def score(can_move=True):
-    global _cached_target, _cached_plan_action
+    global _cached_target, _cached_plan_action, _is_repair
+    _is_repair = False
     # 1. Repair first -- a candidate one hop from the accepting network -- at the
     # highest tier (formerly the separate route_repair state, which outranked the
     # opening plan and ordinary routing).
     _cached_plan_action = None
     _cached_target = _find_route_target(repair=True)
     if _cached_target is not None:
-        if not can_move and not _adjacent_to_me(_cached_target[0]):
+        adj = _adjacent_to_me(_cached_target[0])
+        if not can_move and not adj:
             _cached_target = None
             return 0
-        return REPAIR_SCORE
+        _is_repair = True
+        # Already adjacent -> we lay the reconnect THIS turn; a tier above attack.
+        return ADJ_REPAIR_SCORE if adj else REPAIR_SCORE
     # 2. Building our own opening plan runs at route's normal tier -- "forced valid"
     # while unbuilt, but not a max that overrides everything: attack (tier 9) can
     # still preempt it. We DON'T bail on it just because an enemy or turret threat
@@ -425,7 +438,9 @@ def run(can_move=True):
         return
     log("ROUTE")
     width = map_info._width
-    need = rc.get_conveyor_cost() + map_info.ti_reserve()
+    # The REPAIR (max-score) tier ignores the ti reserve; ordinary dead-end routing
+    # (NORMAL tier) keeps it. The opening plan is also NORMAL -- see _run_plan_action.
+    need = rc.get_conveyor_cost() + (0 if _is_repair else map_info.ti_reserve())
 
     destroy, nxt, seg_dist = target
     # Move into position first. bfs_move keeps us put when we're already adjacent

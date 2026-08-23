@@ -284,7 +284,8 @@ class Pathing:
         [(0, -1, 1), (0, 1, 1), (-1, 0, 1), (1, 0, 1)]
     )
 
-    def bfs_move(self, start_n: int, target_mask: int, avoid: int, avoid_turret: bool = True):
+    def bfs_move(self, start_n: int, target_mask: int, avoid: int, avoid_turret: bool = True,
+                 hard_avoid_turret: bool = False):
         start_mask = 1 << start_n
         # if start_mask & target_mask:
         #     s_idx = (start_mask & target_mask).bit_length() - 1
@@ -310,6 +311,13 @@ class Pathing:
         # separate masks, so a tile covered by one gunner is 7, one sentinel 18,
         # both 25.
         die = map_info.lethal_mask(self.rc.get_hp())
+        # Hard turret avoidance: treat every enemy-turret-threatened tile as
+        # impassable (added to `avoid`), so the search will NEVER route through fire
+        # no matter how much shorter that path is -- the soft tcost bucket only
+        # detours around it. Our own tile stays passable (~start_mask below), so a
+        # bot already in threat can still step out.
+        if hard_avoid_turret:
+            avoid = avoid | map_info._bm_enemy_turret_threat
         avoid = (avoid | die) & ~start_mask
         builders_mask = (bm_friendly_bots | bm_enemy_bots) & ~start_mask
 
@@ -323,7 +331,21 @@ class Pathing:
         # the table -- non-lethal threat never ejects an act-in-place builder, so it
         # can still hold a threatened tile to build/heal.
         threat = map_info._bm_enemy_turret_threat | map_info._bm_enemy_launch_adj
-        start_in_threat = bool(die & start_mask)
+        # Standing in enemy TURRET threat ejects us at once -- but ONLY once we've
+        # taken damage (below full HP). A full-HP builder can hold a threatened tile
+        # to build/heal; a damaged one refuses to rest on it and is forced to step,
+        # even if every step just leads back into threat. (Launcher-adjacency threat
+        # still only adds cost below; it's turret fire a hurt builder won't sit under.)
+        start_in_turret = (bool(map_info._bm_enemy_turret_threat & start_mask)
+                           and self.rc.get_hp() < GameConstants.BUILDER_BOT_MAX_HP)
+        # Never sit in a FRIENDLY gunner's line of fire: a builder on one of its ray
+        # tiles is the first obstruction, so our own gunner's shot lands on us. Force
+        # a step off it, unconditionally (no HP gate) -- exactly like the turret eject.
+        start_in_gunner_lane = bool(map_info._bm_my_gunner_rays & start_mask)
+        eject = start_in_turret or start_in_gunner_lane
+        if eject:
+            target_mask &= ~start_mask
+        start_in_threat = bool(die & start_mask) or eject
         threat &= ~start_mask
 
         # Our own tile is normally a valid "stay" option so it can win a tie
@@ -339,6 +361,30 @@ class Pathing:
         my_team_idx = map_info._my_team_idx
         barriers = bm_et[idx_barrier] & bm_team[my_team_idx]
         barriers &= ~start_mask
+
+        # Ejecting (turret threat or a friendly gunner lane) removed our own tile as a
+        # target; if that left NO target at all, there's no real destination -- just
+        # take the cheapest legal step (out of threat when we can), ties broken at
+        # random. Cheapest first: clear, then threat-only (tcost 3), then barrier
+        # (bcost 15), then both.
+        if eject and target_mask == 0:
+            start_pos = Position(start_n % width, start_n // width)
+            if not movable:
+                return start_pos, start_pos, 0
+            for bucket in (movable & ~threat & ~barriers,
+                           movable & threat & ~barriers,
+                           movable & ~threat & barriers,
+                           movable & threat & barriers):
+                if bucket:
+                    picks = []
+                    bb = bucket
+                    while bb:
+                        b = bb & -bb
+                        bb ^= b
+                        picks.append(b.bit_length() - 1)
+                    choice = random.choice(picks)
+                    return start_pos, Position(choice % width, choice // width), 0
+            return start_pos, start_pos, 0
         # builder.draw_mask(target_mask, 0, 255, 255)
         # builder.draw_mask(avoid, 255, 0, 255)
 
@@ -699,7 +745,7 @@ class Pathing:
         return self.move_to(adj, **kwargs)
 
     def move_to(self, target: Position | set[Position], avoid_turret: bool = True,
-                can_move: bool = True):
+                can_move: bool = True, hard_avoid_turret: bool = False):
         if not can_move:
             # In-place mode: never step. "act now" (False) only if we're already
             # standing on a target tile, else "bail" (True).
@@ -741,7 +787,8 @@ class Pathing:
         target_mask = 0
         for t in target_set:
             target_mask |= 1 << (t.x + t.y * w)
-        result = self.bfs_move(my_pos.x + my_pos.y * w, target_mask, avoid, avoid_turret=avoid_turret)
+        result = self.bfs_move(my_pos.x + my_pos.y * w, target_mask, avoid,
+                               avoid_turret=avoid_turret, hard_avoid_turret=hard_avoid_turret)
         if result is None:
             return False
         s_pos, p_pos, _ = result

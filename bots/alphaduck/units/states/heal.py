@@ -54,7 +54,7 @@ CORE_HEAL_HP = 350
 CORE_IDLE_SCORE = 1.25
 # Above this HP the core is healthy enough that we DON'T tend it at all unless it
 # raises its distress alarm -- no idle top-off, no heal target.
-CORE_ALWAYS_HEAL_HP = 450
+CORE_ALWAYS_HEAL_HP = 400
 
 
 def init(c: Controller):
@@ -108,6 +108,7 @@ def _do_best_heal():
         elif s == best_score:
             best_tiles.append(p)
     if best_tiles:
+        print("healing", best_tiles)
         rc.heal(random.choice(best_tiles))
 
 

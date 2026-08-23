@@ -128,26 +128,34 @@ def _find_harvest_target(repair=False):
 # MAX_SCORE is the higher of the two so the selection loop's early-break is correct.
 NORMAL_SCORE = 4
 REPAIR_SCORE = 7
-MAX_SCORE = 7
+# A repair-quality ore that is ALREADY adjacent (harvestable this turn) jumps above
+# attack (9) so an immediate econ reconnect isn't preempted by a fight.
+ADJ_REPAIR_SCORE = 9.1
+MAX_SCORE = 9.1
 _cached_target = None
+_is_repair = False   # was the cached target selected at the REPAIR (max-score) tier?
 def score(can_move=True):
-    global _cached_target
+    global _cached_target, _is_repair
     # Prefer a repair-quality target -- ore one hop from the accepting network --
     # which scores at the higher repair tier. Otherwise fall back to any
     # harvestable ore at the plain tier.
     _cached_target = _find_harvest_target(repair=True)
     repair = _cached_target is not None
+    _is_repair = repair
     if _cached_target is None:
         _cached_target = _find_harvest_target(repair=False)
     if _cached_target is None:
         return 0
-    if not can_move:
+    best_ore = _cached_target[0]
+    my = map_info._my_pos
+    adjacent = abs(best_ore.x - my.x) + abs(best_ore.y - my.y) == 1
+    if not can_move and not adjacent:
         # In-place retry: only worth it if the ore is already cardinally adjacent.
-        best_ore = _cached_target[0]
-        my = map_info._my_pos
-        if abs(best_ore.x - my.x) + abs(best_ore.y - my.y) != 1:
-            _cached_target = None
-            return 0
+        _cached_target = None
+        return 0
+    # Adjacent repair ore -> harvest it THIS turn, a tier above the normal repair.
+    if repair and adjacent:
+        return ADJ_REPAIR_SCORE
     return REPAIR_SCORE if repair else NORMAL_SCORE
 
 
@@ -171,7 +179,9 @@ def run(can_move=True):
         rc.destroy(best_ore)
         map_info.update_at(best_ore)
 
-    if rc.can_build_harvester(best_ore) and rc.get_global_resources() >= rc.get_harvester_cost() + map_info.ti_reserve():
+    # The REPAIR (max-score) tier ignores the ti reserve; the plain tier keeps it.
+    reserve = 0 if _is_repair else map_info.ti_reserve()
+    if rc.can_build_harvester(best_ore) and rc.get_global_resources() >= rc.get_harvester_cost() + reserve:
         p0 = path[0]
         # Make sure we don't block ourselves off from the start of the path
         _, reach = nav.closest(1 << (p0.x + p0.y * w),
