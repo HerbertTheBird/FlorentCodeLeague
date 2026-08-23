@@ -507,6 +507,13 @@ def ally_positions() -> list:
     return list(_comm_friendly.values()) if _comm_friendly else []
 
 
+def is_lead_builder() -> bool:
+    """True only for the FIRST builder the core spawned -- identified by SPAWN TURN.
+    Originals spawn one per round (round r -> pair r-1), so the first builder is the
+    unique one whose spawn turn is 1. Id-free and known locally on that builder."""
+    return _spawn_round == 1
+
+
 def friendly_bots() -> list:
     """(Position, id) for each live friendly builder this turn. The core knows each
     pair's id from its own spawns (originals in spawn order, later ones by pair)."""

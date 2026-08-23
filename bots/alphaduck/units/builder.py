@@ -69,7 +69,10 @@ _plan_read = False
 _rush_mode = False
 
 def in_rush_mode() -> bool:
-    return _rush_mode
+    # Latched on completing our economy (_rush_mode), but only the FIRST builder (by
+    # spawn turn) acts on it -- so just one builder rushes, not every builder that
+    # finishes its economy.
+    return _rush_mode and comms.is_lead_builder()
 
 def enter_rush_mode() -> None:
     global _rush_mode
@@ -81,7 +84,7 @@ def rush_can_act() -> bool:
     core. Outside that zone -- or before we know where the enemy core is -- it can only
     MOVE (explore) toward the core. Always True when not in rush mode. The core-alarm
     heal is exempt and handled separately (a builder can always go back to heal)."""
-    if not _rush_mode:
+    if not in_rush_mode():
         return True
     zone = map_info.enemy_core_strike_zone()
     if not zone:
