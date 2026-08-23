@@ -81,7 +81,11 @@ _HEAL_PRIORITY[map_info._IDX_CORE] = 6
 def _do_best_heal():
     w, h = map_info._width, map_info._height
     my = map_info._bm_team[map_info._my_team_idx]
-    healable = my & map_info._bm_damaged
+    # Screen barriers are excluded here too, not just in _find_target: this is the
+    # free adjacent top-off, and a builder standing beside a muzzle barrier would
+    # otherwise repair it every turn for free -- the exact thing that ruins the
+    # ammo trade (see map_info.screen_barriers()).
+    healable = my & map_info._bm_damaged & ~map_info.screen_barriers()
     my_pos = map_info._my_pos
     best_score = -1
     best_tiles = []
@@ -211,6 +215,10 @@ def _find_target():
     # A turret trading fire with an enemy turret is not a rescue target (see
     # _dueling_turrets): don't let it monopolise a builder that could be attacking.
     damaged_any &= ~_dueling_turrets()
+    # A barrier plugging an enemy gunner's muzzle is there to EAT shots -- healing
+    # it at 1 Ti per 4 HP throws away the trade it exists to make. Let it die and
+    # let the screen state rebuild it for 3 Ti.
+    damaged_any &= ~map_info.screen_barriers()
     # Only buildings a heal would actually be spent on. A lightly-dented building
     # (<= HEAL_MIN_DAMAGE) used to be kept if its HP had just moved, on the theory
     # it was under active fire -- but _do_best_heal declines to top off a 1-2 point
@@ -333,7 +341,8 @@ def _detour_target(primary: Position):
     enemies_on_p = _adj_enemy_count(primary.x, primary.y, enemy_bots) if enemy_bots else 0
 
     # All visible damaged friendly buildings within heal range, excluding primary.
-    cand = (my & map_info._bm_damaged & map_info._bm_visible
+    cand = (my & map_info._bm_damaged & ~map_info.screen_barriers()
+            & map_info._bm_visible
             & map_info.expand_manhattan(my_bit, MAX_HEAL_DIST) & ~(1 << p_n))
     best = None
     best_hp = None
@@ -408,7 +417,7 @@ def _adjacent_multi_damaged() -> bool:
     my = map_info._bm_team[map_info._my_team_idx]
     my_pos = map_info._my_pos
     my_bit = 1 << (my_pos.x + my_pos.y * map_info._width)
-    dmg = map_info._bm_damaged
+    dmg = map_info._bm_damaged & ~map_info.screen_barriers()
     if _core_hp() >= CORE_HEAL_HP:
         dmg = dmg & ~map_info._bm_my_core_area
     dmg = dmg & ~_dueling_turrets()        # a dueling turret isn't a heal emergency

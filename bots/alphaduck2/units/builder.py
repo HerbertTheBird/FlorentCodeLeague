@@ -19,6 +19,7 @@ import units.states.attack   as attack
 import units.states.chase    as chase
 import units.states.chip     as chip
 import units.states.block    as block
+import units.states.screen   as screen
 import units.defense as defense
 
 from log import DRAW_DEBUG, log
@@ -29,7 +30,7 @@ nav: Pathing = None
 
 # Sorted in descending order of max score to allow early break in selection loop
 states = tuple(sorted(
-    [explore, disrupt, harvest, route, heal, attack, chase, chip, block],
+    [explore, disrupt, harvest, route, heal, attack, chase, chip, block, screen],
     key=lambda s: s.MAX_SCORE,
     reverse=True
 ))

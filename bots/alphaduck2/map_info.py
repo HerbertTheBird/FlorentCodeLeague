@@ -513,6 +513,67 @@ def _compute_enemy_sentinel_threat() -> int:
     return threat & _board_mask
 
 
+def enemy_gunner_muzzles() -> int:
+    """The single tile directly in front of each visible enemy gunner (its
+    position plus its facing delta).
+
+    A gunner's ray is absorbed by the first occupied tile, so a barrier on this
+    tile turns the gunner off completely. The trade is why we want it: a barrier
+    is 3 Ti base and 30 HP, and GUNNER_DAMAGE is 7, so the enemy spends five
+    shots -- 5 * GUNNER_AMMO_COST = 20 ammo, which they bought 1:1 with titanium
+    -- to remove 3 Ti of ours. Rebuilding costs us 3 again against another 20 of
+    theirs.
+
+    Derived from the building direction bitplanes rather than rc.get_direction(),
+    so it costs no controller calls and works for gunners remembered out of
+    vision. Shift-masked per direction, so it never wraps at a map edge."""
+    enemy_idx = 1 - _my_team_idx
+    gunners = _bm_et[_IDX_GUNNER] & _bm_team[enemy_idx]
+    if not gunners:
+        return 0
+    w = _width
+    out = 0
+    for di in range(8):
+        dm = gunners & _bm_dir[di]
+        if not dm:
+            continue
+        dx, dy = _DIRECTION_DELTAS_I[di]
+        shift_mask = _turret_shift_masks.get((dx, dy))
+        if shift_mask is None:
+            continue
+        dm &= shift_mask
+        if not dm:
+            continue
+        offset = dx + dy * w
+        out |= (dm << offset) if offset > 0 else (dm >> -offset)
+    return out & _board_mask
+
+
+def screen_barrier_sites() -> int:
+    """Muzzle tiles we could actually drop a barrier on: known, empty, no wall,
+    no building (conveyors included -- they occupy the tile), no bot."""
+    tiles = enemy_gunner_muzzles()
+    if not tiles:
+        return 0
+    return (tiles
+            & _bm_seen
+            & ~_bm_any_building
+            & ~_bm_env[_IDX_ENV_WALL]
+            & ~_bm_friendly_bots
+            & ~_bm_enemy_bots)
+
+
+def screen_barriers() -> int:
+    """Our own barriers currently standing in a muzzle tile. These are meant to
+    eat shots, so heal deliberately leaves them alone: every 4 HP we put back
+    costs us 1 Ti and saves the enemy nothing, while letting the barrier die and
+    rebuilding it costs 3 Ti against ~20 of their ammo. Healing it would convert
+    a winning trade into a grinding one."""
+    return (enemy_gunner_muzzles()
+            & _bm_team[_my_team_idx]
+            & _bm_et[_IDX_BARRIER])
+
+
 _GUNNER_DAMAGE = GameConstants.GUNNER_DAMAGE       # 7
 _SENTINEL_DAMAGE = GameConstants.SENTINEL_DAMAGE   # 18
 
