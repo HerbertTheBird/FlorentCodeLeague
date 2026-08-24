@@ -93,11 +93,6 @@ def not_blocked():
     )
     return map_info._board_mask & ~already_routed & ~blocked & ~map_info._bm_enemy_turret_threat
 
-def cant_claim():
-    my_pos = map_info._my_pos
-    my_bit = 1 << (my_pos.x + my_pos.y * map_info._width)
-    return map_info._bm_others_3x3 & ~map_info.expand_chebyshev(my_bit)
-
 def _my_claims(repair=False):
     my_pos = map_info._my_pos
     my_mask = 1 << (my_pos.x + my_pos.y * map_info._width)
@@ -137,7 +132,6 @@ def _my_claims(repair=False):
         return 0
     avoid = (
         payg.too_expensive(_cost_map, rc.get_global_resources(), rc.get_current_round())
-        | cant_claim()
         | _unpathable_mask()
     )
     units.builder.draw_mask(pathing.claim_subset(my_mask, map_info._bm_friendly_bots, candidates & ~avoid, tie_self=True), 0, 255, 0)
