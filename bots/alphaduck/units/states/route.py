@@ -340,7 +340,6 @@ def _find_route_target(repair=False):
                     _mark_unpathable(cand_bit)
                     candidates &= ~cand_bit
                     continue
-                print(f"DBG-TC0-BARRIER at {tc0}")
             # One of our own buildings (the hard_block re-orient case) must be
             # destroyed first, which is gated on the spawn reserve; require it.
             elif rc.get_global_resources() < need:

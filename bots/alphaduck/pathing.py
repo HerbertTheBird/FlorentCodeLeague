@@ -20,7 +20,7 @@ conveyor_end_cost = 4
 # impassable, just expensive (~10 extra route-steps), so the search prefers a detour
 # of up to this length before committing to attack a barrier down. route.run fires on
 # the barrier instead of building until it dies, then lays the conveyor.
-BARRIER_ROUTE_COST = 1  # FORCED-TEST
+BARRIER_ROUTE_COST = 10
 
 
 # Offsets (dx, dy) such that lsb_pos = target_pos + (dx, dy) covers all 9
@@ -757,7 +757,6 @@ class Pathing:
             # costs 1. (nb is 0 whenever there are no enemy barriers -> no extra work.)
             nb = new_card & enemy_barriers
             if nb:
-                print(f"DBG-BARRIER-ROUTE nb_pc={nb.bit_count()} i={i}")
                 frontier[(i + 1) % cycle_len] |= new_card & ~nb
                 frontier[(i + BARRIER_ROUTE_COST) % cycle_len] |= nb
             else:
