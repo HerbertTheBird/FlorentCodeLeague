@@ -153,19 +153,17 @@ def score(can_move=True):
     _cached_target = None
     if not can_move:
         return 0                            # chasing is pure movement
-    # Chase (mirroring a raider toward our core) is allowed ONLY against a lone early
-    # rusher: the enemy has EVER fielded exactly one builder and its id is 3/4. The
-    # moment we know of more than one enemy id, we never enter chase again.
-    if not _lone_rusher_id_ok():
-        return 0
-    # Lone-rusher lock: whichever friendly is closest to its block-spot locks on at top
-    # priority (11) so that lone rusher never slips away. This bypasses the rush gate.
-    tgt = _closest_lock_target()
-    if tgt is not None:
-        _cached_target = tgt
-        return LOCK_SCORE
-    # Not the closest: a rush builder stays committed to the enemy core; any other
-    # builder may still tail the lone rusher at the normal tier.
+    # Lone-rusher lock (bypasses the rush-mode gate): the enemy has only EVER fielded
+    # one builder, id 3 or 4. Whichever friendly is closest to it locks on at top
+    # priority (11) so that lone rusher never slips away.
+    if _lone_rusher_id_ok():
+        tgt = _closest_lock_target()
+        if tgt is not None:
+            _cached_target = tgt
+            return LOCK_SCORE
+    # Otherwise a rush-mode builder stays fully committed to the enemy core -- it never
+    # peels back to chase raiders (the old early-raider exception is dropped; only the
+    # lone-rusher lock above can pull a rush builder off the enemy core).
     if units.builder.in_rush_mode():
         return 0
     claims, emap = _my_claims()             # claimed INTERPOSE tiles + enemy-by-tile map
