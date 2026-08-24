@@ -55,25 +55,68 @@ def _my_claims() -> int:
     return pathing.claim_subset(my_mask, map_info._bm_friendly_bots, enemies, tie_self=False)
 
 
-MAX_SCORE = 5.9
+NORMAL_SCORE = 5.9
+LOCK_SCORE = 11          # lone early rusher (enemy id 3/4, only 1 ever seen) + I'm closest
+MAX_SCORE = 11
 _cached_target = None
+
+
+def _lone_rusher_id_ok() -> bool:
+    """The enemy has only EVER shown one builder, and its id is 3 or 4."""
+    ev = map_info._enemy_ids_ever
+    return len(ev) == 1 and next(iter(ev)) in (3, 4)
+
+
+def _closest_lock_target():
+    """The current enemy builder if I'm the friendly closest to it, else None."""
+    enemies = map_info._bm_enemy_bots
+    if not enemies:
+        return None
+    w = map_info._width
+    my_pos = map_info._my_pos
+    my_mask = 1 << (my_pos.x + my_pos.y * w)
+    mine = pathing.claim_subset(my_mask, map_info._bm_friendly_bots, enemies, tie_self=False)
+    if not mine:
+        return None
+    tgt, _ = nav.closest(mine)
+    return tgt
+
+
+def _rush_chase_allowed() -> bool:
+    """A rush-mode builder normally won't peel back to chase -- EXCEPT to run down a
+    lone early enemy raider: round < 150, we believe there's exactly ONE enemy builder
+    total, and that builder's id is 3 or 4 (the enemy's first-spawned builder)."""
+    if rc.get_current_round() >= 150:
+        return False
+    if map_info._bm_enemy_bots.bit_count() != 1:
+        return False
+    n = map_info._bm_enemy_bots.bit_length() - 1
+    return map_info._comm_enemy_ids.get(n) in (3, 4)
 
 
 def score(can_move=True):
     global _cached_target
     _cached_target = None
-    # A rush-mode builder has committed to the enemy core -- it doesn't peel back to
-    # chase raiders in our half.
-    if units.builder.in_rush_mode():
-        return 0
     if not can_move:
         return 0                            # chasing is pure movement
+    # Lone-rusher lock (bypasses the rush-mode gate): the enemy has only EVER fielded
+    # one builder, id 3 or 4. Whichever friendly is closest to it locks on at top
+    # priority (11) so that lone rusher never slips away.
+    if _lone_rusher_id_ok():
+        tgt = _closest_lock_target()
+        if tgt is not None:
+            _cached_target = tgt
+            return LOCK_SCORE
+    # Otherwise a rush-mode builder stays committed to the enemy core (save the narrow
+    # early-raider exception in _rush_chase_allowed).
+    if units.builder.in_rush_mode() and not _rush_chase_allowed():
+        return 0
     claims = _my_claims()
     if claims:
         target, _ = nav.closest(claims)     # nearest reachable raider
         if target is not None:
             _cached_target = target
-    return MAX_SCORE if _cached_target is not None else 0
+    return NORMAL_SCORE if _cached_target is not None else 0
 
 
 def _nearest_core_tile(ex: int, ey: int):

@@ -1294,6 +1294,7 @@ def update_symmetry_from_comms(sym_bits):
 # --- new 2-slot comms integration (bit0=rot, bit1=ver, bit2=hor everywhere) ---
 _comm_enemy_ids: dict = {}       # tile index -> enemy id mod 128 (this turn only)
 _seen_enemy_ids: set = set()     # enemy ids (mod 128) this unit sees itself THIS turn
+_enemy_ids_ever: set = set()     # every distinct enemy id (mod 128) observed all game
 _seen_uids: set = set()          # builder-bot uids this unit sees itself THIS turn
 # Claim tiebreak partition of _bm_friendly_bots (rebuilt each turn in set_comm_bots):
 #   _bm_friendly_tie_lose -- other bots I WIN equal-distance ties against (I claim)
@@ -1454,6 +1455,8 @@ def set_comm_bots(friendly_claims, enemy_pos_ids) -> None:
         _bm_enemy_bots |= 1 << n
         ids[n] = eid
     _comm_enemy_ids = ids
+    global _enemy_ids_ever
+    _enemy_ids_ever |= set(emap.keys())   # cumulative: every enemy id ever observed
 
 
 def note_symmetry_conflict(n: int, env_idx: int) -> None:
