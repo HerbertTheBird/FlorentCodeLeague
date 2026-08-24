@@ -285,7 +285,7 @@ class Pathing:
     )
 
     def bfs_move(self, start_n: int, target_mask: int, avoid: int, avoid_turret: bool = True,
-                 hard_avoid_turret: bool = False):
+                 hard_avoid_turret: bool = False, axis_priority=None):
         start_mask = 1 << start_n
         # if start_mask & target_mask:
         #     s_idx = (start_mask & target_mask).bit_length() - 1
@@ -357,7 +357,6 @@ class Pathing:
             can_move_to = movable
         else:
             can_move_to = movable | start_mask
-
         my_team_idx = map_info._my_team_idx
         barriers = bm_et[idx_barrier] & bm_team[my_team_idx]
         barriers &= ~start_mask
@@ -516,18 +515,6 @@ class Pathing:
                     all_covered = hit & cover_mask
                     if all_covered:
                         from_mask = all_covered
-                border = self._board_border | bm_friendly_bots
-                last_working_mask = from_mask
-                c = 0
-                while from_mask and c <= 4:
-                    c += 1
-                    last_working_mask = from_mask
-                    from_mask &= ~border
-                    border = map_info.expand_manhattan(border)
-                from_mask = last_working_mask
-                # Tiebreak among equal-cost first steps: pick the tile whose
-                # Chebyshev distance to the (nearest) target is smallest.
-                if single_target:
                     targets = ((tx, ty),)
                 else:
                     targets = []
@@ -537,20 +524,65 @@ class Pathing:
                         tm ^= tb
                         tnn = tb.bit_length() - 1
                         targets.append((tnn % w, tnn // w))
-                best_dir = None
-                best_cheb = None
-                while from_mask:
-                    check_bit = from_mask & -from_mask
-                    from_mask ^= check_bit
-                    n = check_bit.bit_length() - 1
+
+                # Step 5 -- runs BEFORE the border/friendly-bot peeling below: keep only
+                # the candidates minimizing (Chebyshev to nearest target, axis penalty).
+                # The "get closer" rule DOMINATES the peeling, so a strictly-closer step
+                # is never discarded just for being near the board edge or a teammate.
+                # axis_priority is the secondary soft tiebreak (prefer that axis).
+                def _cheb_key(n):
                     nx = n % width
                     ny = n // width
                     cheb = min(max(abs(nx - tx2), abs(ny - ty2)) for tx2, ty2 in targets)
-                    if best_cheb is None or cheb < best_cheb:
-                        best_cheb = cheb
-                        best_dir = (nx - cx, ny - cy)
+                    if axis_priority == 'horizontal':
+                        ap = 0 if nx != cx else 1
+                    elif axis_priority == 'vertical':
+                        ap = 0 if ny != cy else 1
+                    else:
+                        ap = 0
+                    return (cheb, ap)
+                best_key = None
+                m2 = from_mask
+                while m2:
+                    b = m2 & -m2
+                    m2 ^= b
+                    k = _cheb_key(b.bit_length() - 1)
+                    if best_key is None or k < best_key:
+                        best_key = k
+                keep = 0
+                m2 = from_mask
+                while m2:
+                    b = m2 & -m2
+                    m2 ^= b
+                    if _cheb_key(b.bit_length() - 1) == best_key:
+                        keep |= b
+                from_mask = keep
 
-                return start_pos, Position(cx + best_dir[0], cy + best_dir[1]), i
+                # Step 4 -- now only among the CLOSEST candidates: prefer interior tiles
+                # away from the board edge / friendly bots (keep the last non-empty set).
+                border = self._board_border | bm_friendly_bots
+                last_working_mask = from_mask
+                c = 0
+                while from_mask and c <= 4:
+                    c += 1
+                    last_working_mask = from_mask
+                    from_mask &= ~border
+                    border = map_info.expand_manhattan(border)
+                from_mask = last_working_mask
+
+                # DEBUG: the candidates the final tiebreak chooses among -> blue dots.
+                if DRAW_DEBUG:
+                    _dbg = from_mask
+                    while _dbg:
+                        _db = _dbg & -_dbg
+                        _dbg ^= _db
+                        _dn = _db.bit_length() - 1
+                        self.rc.draw_indicator_dot(Position(_dn % width, _dn // width), 0, 0, 255)
+
+                # Any survivor of the closest-then-interior set (lowest tile index).
+                pick = from_mask & -from_mask
+                pn = pick.bit_length() - 1
+                return start_pos, Position(pn % width, pn // width), i
             # 4-neighbour (cardinal) expansion — movement is cardinal-only
             f = cur_frontier
             expanded = f | ((f & nrc) << 1) | ((f & nlc) >> 1) | (f << w) | (f >> w)
@@ -745,7 +777,7 @@ class Pathing:
         return self.move_to(adj, **kwargs)
 
     def move_to(self, target: Position | set[Position], avoid_turret: bool = True,
-                can_move: bool = True, hard_avoid_turret: bool = False):
+                can_move: bool = True, hard_avoid_turret: bool = False, axis_priority=None):
         if not can_move:
             # In-place mode: never step. "act now" (False) only if we're already
             # standing on a target tile, else "bail" (True).
@@ -788,7 +820,8 @@ class Pathing:
         for t in target_set:
             target_mask |= 1 << (t.x + t.y * w)
         result = self.bfs_move(my_pos.x + my_pos.y * w, target_mask, avoid,
-                               avoid_turret=avoid_turret, hard_avoid_turret=hard_avoid_turret)
+                               avoid_turret=avoid_turret, hard_avoid_turret=hard_avoid_turret,
+                               axis_priority=axis_priority)
         if result is None:
             return False
         s_pos, p_pos, _ = result

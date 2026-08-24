@@ -13,7 +13,7 @@ import map_info
 import pathing
 from pathing import Pathing
 import units.builder
-from fcode import Controller
+from fcode import Controller, Position
 from log import log
 
 rc: Controller = None
@@ -76,8 +76,58 @@ def score(can_move=True):
     return MAX_SCORE if _cached_target is not None else 0
 
 
+def _nearest_core_tile(ex: int, ey: int):
+    """The core tile (of our 2x2) nearest the enemy at (ex, ey), or None if we have
+    no core. Clamp the enemy coords into the core's [cx, cx+1] x [cy, cy+1] box."""
+    core = map_info._my_core
+    if core is None:
+        return None
+    ncx = core.x if ex < core.x else (core.x + 1 if ex > core.x + 1 else ex)
+    ncy = core.y if ey < core.y else (core.y + 1 if ey > core.y + 1 else ey)
+    return ncx, ncy
+
+
 def run(can_move=True):
     if not can_move or _cached_target is None:
         return
     log("CHASE", _cached_target)
-    nav.move_to(_cached_target)
+    enemy = _cached_target
+    w, h = map_info._width, map_info._height
+
+    # The cardinal direction from the enemy toward our core -- the way they'd advance
+    # to reach it. We want to stand on the far side of them (one tile toward the core)
+    # to body-block that advance. Horizontal wins ties.
+    nc = _nearest_core_tile(enemy.x, enemy.y)
+    rdx = rdy = 0
+    axis_priority = None
+    if nc is not None:
+        dx, dy = nc[0] - enemy.x, nc[1] - enemy.y
+        if dx == 0 and dy == 0:
+            pass                                    # enemy sitting on the core
+        elif abs(dx) >= abs(dy):                    # horizontal is most relevant
+            rdx, axis_priority = (1 if dx > 0 else -1), 'vertical'   # slide perp to close in
+        else:                                       # vertical is most relevant
+            rdy, axis_priority = (1 if dy > 0 else -1), 'horizontal'
+
+    # Interpose target = EITHER one tile toward the core from the enemy, OR two tiles
+    # (both on the core-side, blocking the advance). Keep whichever are real, open
+    # tiles and let move_to pick the nearer; if neither is valid, just tail the enemy.
+    my = map_info._my_pos
+    targets = set()
+    if rdx or rdy:
+        for mult in (1, 2):
+            tp = Position(enemy.x + rdx * mult, enemy.y + rdy * mult)
+            if not (0 <= tp.x < w and 0 <= tp.y < h):
+                continue
+            if tp == my:
+                targets.add(tp)             # already standing on it -> valid; lets us stay
+                continue
+            # Otherwise it must be open terrain with no OTHER bot on it.
+            if (map_info.is_passable(tp)
+                    and not (rc.is_in_vision(tp)
+                             and rc.get_tile_builder_bot_id(tp) is not None)):
+                targets.add(tp)
+    if targets:
+        nav.move_to(targets, axis_priority=axis_priority)
+    else:
+        nav.move_adjacent(enemy)
