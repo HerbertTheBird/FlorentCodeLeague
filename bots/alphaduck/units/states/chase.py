@@ -82,18 +82,6 @@ def _closest_lock_target():
     return tgt
 
 
-def _rush_chase_allowed() -> bool:
-    """A rush-mode builder normally won't peel back to chase -- EXCEPT to run down a
-    lone early enemy raider: round < 150, we believe there's exactly ONE enemy builder
-    total, and that builder's id is 3 or 4 (the enemy's first-spawned builder)."""
-    if rc.get_current_round() >= 150:
-        return False
-    if map_info._bm_enemy_bots.bit_count() != 1:
-        return False
-    n = map_info._bm_enemy_bots.bit_length() - 1
-    return map_info._comm_enemy_ids.get(n) in (3, 4)
-
-
 def score(can_move=True):
     global _cached_target
     _cached_target = None
@@ -107,9 +95,10 @@ def score(can_move=True):
         if tgt is not None:
             _cached_target = tgt
             return LOCK_SCORE
-    # Otherwise a rush-mode builder stays committed to the enemy core (save the narrow
-    # early-raider exception in _rush_chase_allowed).
-    if units.builder.in_rush_mode() and not _rush_chase_allowed():
+    # Otherwise a rush-mode builder stays fully committed to the enemy core -- it never
+    # peels back to chase raiders (the old early-raider exception is dropped; only the
+    # lone-rusher lock above can pull a rush builder off the enemy core).
+    if units.builder.in_rush_mode():
         return 0
     claims = _my_claims()
     if claims:

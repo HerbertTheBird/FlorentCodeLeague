@@ -136,6 +136,10 @@ _cached_target = None
 _is_repair = False   # was the cached target selected at the REPAIR (max-score) tier?
 def score(can_move=True):
     global _cached_target, _is_repair
+    # The dedicated patrol/defence bot does no wider harvesting.
+    if units.builder.is_patrol_builder():
+        _cached_target = None
+        return 0
     # Rush mode: this builder has finished its economy and no longer harvests.
     if units.builder.in_rush_mode():
         _cached_target = None

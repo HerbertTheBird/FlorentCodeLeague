@@ -2570,6 +2570,11 @@ def _compute_avoid(is_route: bool, enemy_pov: bool) -> int:
         mask |= ore & ~landlocked
         if not enemy_pov:
             mask |= _bm_enemy_turret_threat
+        # Enemy barriers are NOT impassable to conveyor routing: they are routable
+        # at a high cost (bfs_route weights them, see BARRIER_ROUTE_COST). A route
+        # that chooses to run through one attacks it down first (route.run). Cleared
+        # last so any avoid term above (buildings, threat) can't re-block them.
+        mask &= ~(_bm_et[_IDX_BARRIER] & _bm_team[1 - _my_team_idx])
     elif not enemy_pov:
         mask |= _bm_enemy_launch_adj
         mask |= _bm_enemy_bots

@@ -182,6 +182,9 @@ def score(can_move=True):
     global _cached_target, _cached_walk
     _cached_target = None
     _cached_walk = None
+    # The dedicated patrol/defence bot does not place blocking barriers on chokes.
+    if units.builder.is_patrol_builder():
+        return 0
     # While the enemy is undeveloped we're rushing their core -- don't peel builders
     # off to barrier-block a bot with no economy worth choking.
     if map_info.enemy_undeveloped():

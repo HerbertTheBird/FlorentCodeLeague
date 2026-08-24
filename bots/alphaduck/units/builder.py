@@ -19,6 +19,7 @@ import units.states.attack   as attack
 import units.states.chase    as chase
 import units.states.chip     as chip
 import units.states.block    as block
+import units.states.patrol   as patrol
 import units.defense as defense
 
 from log import DRAW_DEBUG, log
@@ -29,7 +30,7 @@ nav: Pathing = None
 
 # Sorted in descending order of max score to allow early break in selection loop
 states = tuple(sorted(
-    [explore, disrupt, harvest, route, heal, attack, chase, chip, block],
+    [explore, disrupt, harvest, route, heal, attack, chase, chip, block, patrol],
     key=lambda s: s.MAX_SCORE,
     reverse=True
 ))
@@ -77,6 +78,14 @@ def in_rush_mode() -> bool:
 def enter_rush_mode() -> None:
     global _rush_mode
     _rush_mode = True
+
+
+def is_patrol_builder() -> bool:
+    """The 4th-spawned builder is our dedicated patrol/defence bot: it walks the
+    friendly conveyor belts (units.states.patrol), heals what it passes, and chases
+    raiders, but does no wider economy (dead-end routing, harvest), attack, chip,
+    disrupt or block. It still builds its own opening conveyor plan first."""
+    return comms.is_patrol_builder()
 
 def rush_target_mask() -> int:
     """Tiles a rush-mode builder may ACT ON (place a turret/barrier, disrupt, block,

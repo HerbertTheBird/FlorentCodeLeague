@@ -39,6 +39,9 @@ _cached_target = None
 def score(can_move=True):
     global _cached_target
     _cached_target = None
+    # The dedicated patrol/defence bot does not disrupt enemy ore.
+    if units.builder.is_patrol_builder():
+        return 0
     # While the enemy is undeveloped we're rushing their core -- don't peel builders
     # off to harass a bot with no economy worth disrupting.
     if map_info.enemy_undeveloped():

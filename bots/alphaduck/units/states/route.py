@@ -328,16 +328,22 @@ def _find_route_target(repair=False):
             continue
         tc0 = cand_path[0]
         tc0_n = tc0.x + tc0.y * width
-        if map_info._building_et_idx[tc0_n] >= 0:
-            # An enemy building on the tile we'd route through -- we don't attack
-            # it, so skip this candidate.
-            if not (my_team_bm >> tc0_n) & 1:
-                _mark_unpathable(cand_bit)
-                candidates &= ~cand_bit
-                continue
+        et_tc0 = map_info._building_et_idx[tc0_n]
+        if et_tc0 >= 0:
+            is_mine = bool((my_team_bm >> tc0_n) & 1)
+            if not is_mine:
+                # An enemy BARRIER on the tile we'd route through is NOT a skip: bfs_route
+                # weighted it (BARRIER_ROUTE_COST) and chose it anyway, so run() attacks it
+                # down and then builds. Any OTHER enemy building we still can't route
+                # through -- skip the candidate.
+                if et_tc0 != map_info._IDX_BARRIER:
+                    _mark_unpathable(cand_bit)
+                    candidates &= ~cand_bit
+                    continue
+                print(f"DBG-TC0-BARRIER at {tc0}")
             # One of our own buildings (the hard_block re-orient case) must be
             # destroyed first, which is gated on the spawn reserve; require it.
-            if rc.get_global_resources() < need:
+            elif rc.get_global_resources() < need:
                 candidates &= ~cand_bit
                 continue
         return (tc0, cand_path[1], cand_path[2])
@@ -363,7 +369,10 @@ def score(can_move=True):
     global _cached_target, _cached_plan_action, _is_repair
     _is_repair = False
     # Rush mode: this builder has finished its economy and no longer routes at all.
-    if units.builder.in_rush_mode():
+    # The dedicated patrol/defence bot likewise never routes -- it ignores its opening
+    # plan and patrols the belts from the start (units.states.patrol). (It still has a
+    # conveyor_plan set, which keeps it out of the plan-less first-run rush path.)
+    if units.builder.in_rush_mode() or units.builder.is_patrol_builder():
         _cached_plan_action = None
         _cached_target = None
         return 0
@@ -453,6 +462,17 @@ def run(can_move=True):
     # and safe (so we destroy/build below), but steps us off our tile if it's now
     # lethal -- flee instead of standing there to build and dying.
     if nav.move_adjacent(destroy, can_move=can_move):
+        return
+    # An ENEMY barrier sitting where the next conveyor must go: bfs_route routed
+    # through it (at BARRIER_ROUTE_COST), so attack it down (2 dmg/shot, like chip)
+    # instead of building. Once it dies the tile is clear and the conveyor lays next
+    # time. Enemy barriers can't be rc.destroy()'d (that's for our own buildings).
+    d_n = destroy.x + destroy.y * width
+    if ((map_info._bm_et[map_info._IDX_BARRIER]
+         & map_info._bm_team[1 - map_info._my_team_idx]) >> d_n) & 1:
+        if rc.get_global_resources() >= 2 and rc.can_fire(destroy):
+            rc.fire(destroy)
+            log("ROUTE-ATTACK-BARRIER", destroy)
         return
     # `need` is only known to be covered on the branch that found a building
     # here, and can_destroy is engine truth about a tile we may remember as empty.

@@ -479,6 +479,10 @@ def valid_targets() -> int:
 def score(can_move=True):
     global _cached_valid, _cached_T
     _cached_T = None
+    # The dedicated patrol/defence bot does not chip enemy economy.
+    if units.builder.is_patrol_builder():
+        _cached_valid = 0
+        return 0
     # While the enemy is undeveloped we're rushing their core -- don't peel builders
     # off to harass a bot with no economy worth chipping.
     if map_info.enemy_undeveloped():

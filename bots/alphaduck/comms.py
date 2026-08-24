@@ -580,6 +580,14 @@ def is_lead_builder() -> bool:
     return _spawn_round == 1
 
 
+def is_patrol_builder() -> bool:
+    """True only for the 4th builder the core spawned (spawn turn 4 == the last of the
+    _NUM_ORIGINAL originals). It is our dedicated PATROL/defence bot -- it walks the
+    friendly conveyor network instead of doing wider economy or rushing. Id-free and
+    known locally, same as is_lead_builder."""
+    return _spawn_round == _NUM_ORIGINAL
+
+
 def friendly_bots() -> list:
     """(Position, id) for each live friendly builder this turn. The core knows each
     pair's id from its own spawns (originals in spawn order, later ones by pair)."""

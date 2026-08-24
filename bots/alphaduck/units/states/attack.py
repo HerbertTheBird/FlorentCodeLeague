@@ -1107,6 +1107,9 @@ SIEGE_MIN_HARVESTERS = 2
 
 def score(can_move=True):
     global SENTINEL_CORE_SCORE
+    # The dedicated patrol/defence bot never attacks or plants siege turrets.
+    if units.builder.is_patrol_builder():
+        return 0
 
     # Target the enemy core with a sentinel when the enemy is undeveloped (rush it),
     # OR when we don't already have a sentinel aimed at it -- so we plant the first

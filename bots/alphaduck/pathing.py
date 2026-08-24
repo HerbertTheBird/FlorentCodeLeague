@@ -16,6 +16,11 @@ CARD_DIR = [
 barrier_cost = 15
 threat_cost = 3
 conveyor_end_cost = 4
+# Conveyor routing (bfs_route) may run a route THROUGH an enemy barrier -- it is not
+# impassable, just expensive (~10 extra route-steps), so the search prefers a detour
+# of up to this length before committing to attack a barrier down. route.run fires on
+# the barrier instead of building until it dies, then lays the conveyor.
+BARRIER_ROUTE_COST = 1  # FORCED-TEST
 
 
 # Offsets (dx, dy) such that lsb_pos = target_pos + (dx, dy) covers all 9
@@ -655,7 +660,13 @@ class Pathing:
             t_end &= ~exempt
             t_core |= exempt
 
-        max_c = 1
+        # Enemy barriers are traversable at BARRIER_ROUTE_COST (they were dropped from
+        # `avoid`, so they are in `not_avoid`). Only widen the cost cycle / search depth
+        # when some are actually in play, so the common (barrier-free) route keeps its
+        # tight cost-1 behaviour and search depth.
+        enemy_barriers = (map_info._bm_et[map_info._IDX_BARRIER]
+                          & map_info._bm_team[1 - map_info._my_team_idx])
+        max_c = BARRIER_ROUTE_COST if enemy_barriers else 1
         max_seed = conveyor_end_cost
         cycle_len = max(max_c, max_seed) + 1
         frontier = [0] * cycle_len
@@ -701,12 +712,16 @@ class Pathing:
                     s_idx = start_bit.bit_length() - 1
                     cx = s_idx % width
                     cy = s_idx // width
+                    # If this start tile is an enemy barrier, the step that LANDED on it
+                    # cost BARRIER_ROUTE_COST, so its predecessor sits that many layers
+                    # back (not one).
+                    start_is_barrier = (enemy_barriers >> s_idx) & 1
                     for dx, dy, step_cost in self._ROUTE_OFFSETS:
                         px = cx - dx
                         py = cy - dy
                         if not (0 <= px < width and 0 <= py < height):
                             continue
-                        prev_layer = i - step_cost
+                        prev_layer = i - (BARRIER_ROUTE_COST if start_is_barrier else step_cost)
                         if prev_layer < 0 or prev_layer >= vl_len:
                             continue
                         pn = py * width + px
@@ -738,7 +753,15 @@ class Pathing:
                 | (f << w)
                 | (f >> w)
             ) & not_avoid
-            frontier[(i + 1) % cycle_len] |= new_card
+            # Enemy-barrier tiles cost BARRIER_ROUTE_COST to step onto; everything else
+            # costs 1. (nb is 0 whenever there are no enemy barriers -> no extra work.)
+            nb = new_card & enemy_barriers
+            if nb:
+                print(f"DBG-BARRIER-ROUTE nb_pc={nb.bit_count()} i={i}")
+                frontier[(i + 1) % cycle_len] |= new_card & ~nb
+                frontier[(i + BARRIER_ROUTE_COST) % cycle_len] |= nb
+            else:
+                frontier[(i + 1) % cycle_len] |= new_card
             i += 1
     def move_adjacent(self, pos: Position, fallback: Position | None = None,
                       allow_bots: bool = False, can_move: bool = True, **kwargs):
