@@ -467,6 +467,10 @@ def valid_targets() -> int:
 def score(can_move=True):
     global _cached_valid, _cached_T
     _cached_T = None
+    # Chip only operates with a real titanium cushion (> 20 ti).
+    if rc.get_global_resources() <= 20:
+        _cached_valid = 0
+        return 0
     # A rush-mode builder only acts within Chebyshev-4 of the enemy core.
     if not units.builder.rush_can_act():
         _cached_valid = 0

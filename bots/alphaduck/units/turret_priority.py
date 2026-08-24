@@ -16,7 +16,7 @@ weight (HP as sub-tiebreak).
 """
 
 from main import has_op
-from fcode import EntityType, Position, Direction
+from fcode import EntityType, Position, Direction, GameConstants
 import map_info
 import comms
 from log import DEBUG_LOGGING, log
@@ -298,13 +298,48 @@ def _can_hit_enemy_core(rc) -> bool:
     return False
 
 
+def _has_adjacent_enemy_builder(target_pos) -> bool:
+    """True if an enemy builder bot sits cardinally adjacent to `target_pos` (one that
+    could heal a building there)."""
+    bit = 1 << (target_pos.x + target_pos.y * map_info._width)
+    return bool(map_info.manhattan(bit) & map_info._bm_enemy_bots)
+
+
+def _low_ti_hold(rc, target_pos) -> bool:
+    """Below (ti_reserve + 10) titanium: hold a shot that would be wasted -- one an
+    adjacent enemy builder just heals back, or a chip at the (huge) enemy CORE -- UNLESS
+    it's a one-shot kill (target HP <= our per-shot damage), which is always worth it."""
+    bot_id = rc.get_tile_builder_bot_id(target_pos)
+    if bot_id is not None:
+        hp = rc.get_hp(bot_id)
+        is_core = False
+    else:
+        bid = rc.get_tile_building_id(target_pos)
+        if bid is None:
+            return False
+        hp = rc.get_hp(bid)
+        is_core = rc.get_entity_type(bid) == EntityType.CORE
+    dmg = (GameConstants.SENTINEL_DAMAGE
+           if rc.get_entity_type(rc.get_id()) == EntityType.SENTINEL
+           else GameConstants.GUNNER_DAMAGE)
+    if hp <= dmg:
+        return False                              # one-shot -> take it
+    return is_core or _has_adjacent_enemy_builder(target_pos)
+
+
 def should_hold_fire(rc, target_pos) -> bool:
-    """Conserve ammo: hold fire when the core's broadcast income is <= 1 (0 or 1 -- we
-    are barely generating any resources), an enemy builder bot is in sight, and the
-    shot would be wasted -- the target is at FULL HP (an adjacent enemy builder just
-    heals it back) or is the enemy CORE (a huge HP pool we can't meaningfully dent).
-    Applies to both gunner and sentinel. `target_pos` is the tile we'd fire at. Only
-    kicks in after turn 100 -- early game we always shoot."""
+    """Conserve ammo/titanium. Two independent rules; either holds the shot.
+
+    1. Low titanium: below (ti_reserve + 10) ti, don't spend a shot an adjacent enemy
+       builder would heal back, nor chip the enemy CORE -- unless it's a one-shot kill.
+    2. No income: when the core's broadcast income is <= 1 (barely any resources), an
+       enemy builder is in sight, and the shot is wasted -- target at FULL HP (an
+       adjacent builder heals it) or the enemy CORE. Only after turn 100.
+
+    Applies to both gunner and sentinel. `target_pos` is the tile we'd fire at."""
+    if (rc.get_global_resources() < map_info.ti_reserve() + 10
+            and _low_ti_hold(rc, target_pos)):
+        return True
     if rc.get_current_round() <= 100:
         return False
     if comms.core_income() > 1:

@@ -1130,6 +1130,11 @@ def score(can_move=True):
     else:
         SENTINEL_BUILDING_SCORE[core] = SENTINEL_CORE_SCORE
         GUNNER_BUILDING_SCORE[core] = GUNNER_CORE_SCORE
+    # Under the ti reserve we can't commit to a siege turret at their core -- the
+    # enemy core stops being a valid target until we're back above the reserve.
+    if rc.get_global_resources() < map_info.ti_reserve():
+        SENTINEL_BUILDING_SCORE[core] = 0
+        GUNNER_BUILDING_SCORE[core] = 0
     # The hot scorers read the precomputed bit forms (_SENT_CORE_BITS /
     # _GUN_CORE_BITS_BY_STEP), not the score lists, so re-derive them here or the
     # gate above has no effect.

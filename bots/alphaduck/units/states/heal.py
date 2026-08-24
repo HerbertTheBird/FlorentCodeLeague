@@ -29,6 +29,7 @@ import pathing
 from pathing import Pathing
 import units.builder
 import comms
+from main import has_op
 from fcode import Controller, Position, GameConstants
 from log import log
 import random
@@ -416,6 +417,94 @@ NORMAL_SCORE = 8.75
 # Core HP below which an alarm heal jumps from NORMAL_SCORE to MAX_SCORE.
 CRITICAL_CORE_HP = 300
 _cached_target = None
+_cached_break_replace = None    # (Position, kind, facing) to destroy+rebuild this turn
+
+
+def _adjacent_lower_enemy(x: int, y: int, my_id: int) -> bool:
+    """True if an enemy builder bot with a LOWER id than mine sits cardinally next to
+    (x, y)."""
+    w, h = map_info._width, map_info._height
+    enemy_bots = map_info._bm_enemy_bots
+    ids = map_info._comm_enemy_ids
+    for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+        nx, ny = x + dx, y + dy
+        if 0 <= nx < w and 0 <= ny < h:
+            nn = nx + ny * w
+            if (enemy_bots >> nn) & 1:
+                eid = ids.get(nn)
+                if eid is not None and eid < my_id:
+                    return True
+    return False
+
+
+def _find_break_replace():
+    """A cardinally-adjacent conveyor OR barrier of MINE that is about to be one-shot
+    killed by an enemy turret, has a LOWER-id enemy builder next to it, and that we can
+    afford to rebuild. Returns (Position, kind, facing) or None. We destroy and instantly
+    rebuild it (full HP) -- it survives the incoming shot and the tile stays ours."""
+    w, h = map_info._width, map_info._height
+    my = map_info._my_pos
+    my_team = map_info._bm_team[map_info._my_team_idx]
+    conv = map_info._bm_et[map_info._IDX_CONVEYOR] & my_team
+    barr = map_info._bm_et[map_info._IDX_BARRIER] & my_team
+    sent = map_info._bm_enemy_sentinel_threat
+    gun = map_info._bm_enemy_gunner_threat
+    my_id = rc.get_id()
+    resources = rc.get_global_resources()
+    for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+        x, y = my.x + dx, my.y + dy
+        if not (0 <= x < w and 0 <= y < h):
+            continue
+        n = x + y * w
+        bit = 1 << n
+        if conv & bit:
+            kind, cost = 'conveyor', rc.get_conveyor_cost()
+        elif barr & bit:
+            kind, cost = 'barrier', rc.get_barrier_cost()
+        else:
+            continue
+        if resources < cost:
+            continue                              # can't afford the rebuild
+        # About to die: a single enemy turret that can fire on it kills it this turn.
+        if sent & bit:
+            maxdmg = GameConstants.SENTINEL_DAMAGE
+        elif gun & bit:
+            maxdmg = GameConstants.GUNNER_DAMAGE
+        else:
+            continue
+        hp = map_info._building_hp[n]
+        # It must be doomed even if we heal it -- a plain heal that would save it is
+        # cheaper, so only break-replace when heal(HP) still can't survive the shot.
+        if hp <= 0 or hp + HEAL_AMOUNT > maxdmg:
+            continue
+        if not _adjacent_lower_enemy(x, y, my_id):
+            continue
+        pos = Position(x, y)
+        facing = None
+        if kind == 'conveyor':
+            bid = rc.get_tile_building_id(pos)
+            if bid is None:
+                continue
+            facing = rc.get_direction(bid)
+        return (pos, kind, facing)
+    return None
+
+
+def _do_break_replace(job) -> None:
+    pos, kind, facing = job
+    log("BREAK-REPLACE", pos)
+    cost = rc.get_conveyor_cost() if kind == 'conveyor' else rc.get_barrier_cost()
+    if not (rc.can_destroy(pos) and has_op() and rc.get_global_resources() >= cost):
+        return
+    rc.destroy(pos)
+    map_info.update_at(pos)
+    if kind == 'conveyor':
+        if rc.can_build_conveyor(pos, facing):
+            rc.build_conveyor(pos, facing)
+            map_info.update_at(pos)
+    elif rc.can_build_barrier(pos):
+        rc.build_barrier(pos)
+        map_info.update_at(pos)
 
 
 def _adjacent_multi_damaged() -> bool:
@@ -454,7 +543,13 @@ def _idle_core_target():
 
 
 def score(can_move=True):
-    global _cached_target
+    global _cached_target, _cached_break_replace
+    # Break-and-replace is an in-place action (destroy + rebuild a doomed adjacent
+    # conveyor/barrier) -- evaluate it first, and even during the free-action retry.
+    _cached_break_replace = _find_break_replace()
+    if _cached_break_replace is not None:
+        _cached_target = None
+        return MAX_SCORE
     if not can_move:
         # Heal's in-place action (topping off an adjacent building) already runs
         # every turn via _do_best_heal(), so there's nothing extra for the retry.
@@ -521,6 +616,9 @@ def _hold_or_flee():
 
 
 def run(can_move=True):
+    if _cached_break_replace is not None:
+        _do_break_replace(_cached_break_replace)   # in-place: destroy + rebuild the doomed tile
+        return
     if not can_move:
         return              # heal never wins the in-place retry (see score())
     target = _cached_target

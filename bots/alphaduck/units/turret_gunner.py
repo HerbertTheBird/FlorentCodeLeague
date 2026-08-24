@@ -178,7 +178,7 @@ def run():
 
     current = rc.get_direction()
     rotate_cost = GameConstants.GUNNER_ROTATE_COST + GameConstants.GUNNER_AMMO_COST
-    can_rotate = rc.get_global_resources() >= rotate_cost
+    can_rotate = rc.get_global_resources() >= rotate_cost + map_info.ti_reserve()
     w = map_info._width
     loaded = map_info._bm_ti_carrying
 
