@@ -78,19 +78,16 @@ def enter_rush_mode() -> None:
     global _rush_mode
     _rush_mode = True
 
-def rush_can_act() -> bool:
-    """Whether a rush-mode builder may ACT right now (place turrets/barriers, disrupt,
-    block, chip, non-alarm heal): only while it stands within Chebyshev-4 of the enemy
-    core. Outside that zone -- or before we know where the enemy core is -- it can only
-    MOVE (explore) toward the core. Always True when not in rush mode. The core-alarm
-    heal is exempt and handled separately (a builder can always go back to heal)."""
+def rush_target_mask() -> int:
+    """Tiles a rush-mode builder may ACT ON (place a turret/barrier, disrupt, block,
+    chip, non-alarm heal): those within Chebyshev-4 of the enemy core. The criterion is
+    on the TARGET TILE, not where the builder stands -- callers AND their candidate mask
+    with this. `~0` (no restriction) when not in rush mode; `0` (act nowhere) if in rush
+    mode but we don't yet know where the enemy core is. The core-alarm heal is exempt and
+    handled separately (a builder can always go back to heal)."""
     if not in_rush_mode():
-        return True
-    zone = map_info.enemy_core_strike_zone()
-    if not zone:
-        return False
-    my = map_info._my_pos
-    return bool((zone >> (my.x + my.y * map_info._width)) & 1)
+        return ~0
+    return map_info.enemy_core_strike_zone()
 
 
 def _core_ward_dir(pos: Position):
@@ -301,7 +298,6 @@ def run():
     # conveyors were already laid (attack/heal outscore route). _plan_next_action()
     # re-checks every step against the live map, so a truly stale plan just yields
     # nothing on its own.
-    pass
     best_state.run()
 
     heal._do_best_heal()

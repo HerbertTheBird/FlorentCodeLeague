@@ -134,8 +134,9 @@ def _my_claims(repair=False):
         payg.too_expensive(_cost_map, rc.get_global_resources(), rc.get_current_round())
         | _unpathable_mask()
     )
-    units.builder.draw_mask(pathing.claim_subset(my_mask, map_info._bm_friendly_bots, candidates & ~avoid, tie_self=True), 0, 255, 0)
-    return pathing.claim_subset(my_mask, map_info._bm_friendly_bots, candidates & ~avoid, tie_self=True)
+    others = map_info.claim_bots()   # drop dedicated rushers -- they never route
+    units.builder.draw_mask(pathing.claim_subset(my_mask, others, candidates & ~avoid, tie_self=True), 0, 255, 0)
+    return pathing.claim_subset(my_mask, others, candidates & ~avoid, tie_self=True)
 
 _cached_target = None        # (destroy, nxt, seg_dist) picked+validated in score()
 _cached_plan_action = None   # ("conveyor", pos, facing) | ("harvester", ore) | None
@@ -354,7 +355,7 @@ def _adjacent_to_me(pos) -> bool:
 # this turn) it jumps to ADJ_REPAIR_SCORE -- above attack (9), so an immediate econ
 # reconnect isn't preempted by a fight. MAX_SCORE is the highest so the selection
 # loop's early-break stays correct.
-NORMAL_SCORE = 5
+NORMAL_SCORE = 6.1
 REPAIR_SCORE = 8
 ADJ_REPAIR_SCORE = 9.2
 MAX_SCORE = 9.2
@@ -409,21 +410,23 @@ def _run_plan_action(action, can_move=True) -> None:
         cd = _core_ward_dir(pos)
         if cd is not None:
             facing = cd                     # next to the core: always output into it
+        # Move into place first: already adjacent+safe -> bfs_move keeps us put and we
+        # build below; on a friendly gunner's lane -> it steps us off instead.
+        if nav.move_adjacent(pos, allow_bots=True, can_move=can_move):
+            return
         need = rc.get_conveyor_cost() + map_info.ti_reserve()
         if rc.get_global_resources() >= need and rc.can_build_conveyor(pos, facing):
             rc.build_conveyor(pos, facing)
             map_info.update_at(pos)
-        else:
-            nav.move_adjacent(pos, allow_bots=True, can_move=can_move)
     else:  # harvester, right after the conveyor next to its ore
         _, ore, conv = action
+        if nav.move_adjacent(ore, allow_bots=True, can_move=can_move):
+            return
         need = rc.get_harvester_cost() + map_info.ti_reserve()
         if rc.get_global_resources() >= need and rc.can_build_harvester(ore):
             rc.build_harvester(ore)
             map_info.update_at(ore)
             # route-tally removed; siege gates on predicted income now
-        else:
-            nav.move_to(conv, can_move=can_move)
 
 def run(can_move=True):
     # Opening plan takes precedence when this builder has one still going up.

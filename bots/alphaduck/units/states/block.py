@@ -35,8 +35,9 @@ def init(c: Controller):
 #   * a choke already cardinally adjacent to me -> place it now, MAX_SCORE, no move;
 #   * a choke I can win the reach-race to -> walk toward it at WALK_SCORE.
 # ----------------------------------------------------------------------------
-MAX_SCORE = 10          # tier A: a choke is already adjacent -> place, never move
-WALK_SCORE = 5.8        # tier B: a choke I can beat the enemy to -> walk to it
+MAX_SCORE = 10          # tier A: a REGULAR choke is already adjacent -> place, never move
+PRIORITY_SCORE = 9.1    # a high-value choke (see _priority_block_tiles) -> take first
+WALK_SCORE = 5.95        # tier B: a choke I can beat the enemy to -> walk to it
 _REACH_CAP = 12         # how far I'll consider walking to a choke
 
 _cached_target = None   # tier A: adjacent choke tile to barrier this turn (no move)
@@ -128,13 +129,59 @@ def _adjacent_choke_now(choke: int):
     return random.choice(hits) if hits else None
 
 
+def _priority_block_tiles() -> int:
+    """High-value chokes worth taking BEFORE any regular choke -- a barrierable tile
+    that is either
+      (a) the OUTPUT of an enemy conveyor AND within Chebyshev-2 of any enemy core
+          tile (cutting a belt right at their core), or
+      (b) cardinally adjacent to BOTH an enemy harvester AND an enemy conveyor.
+    """
+    enemy = map_info._bm_team[1 - map_info._my_team_idx]
+    enemy_conv = map_info._bm_et[map_info._IDX_CONVEYOR] & enemy
+    enemy_harv = map_info._bm_et[map_info._IDX_HARVESTER] & enemy
+    # (a) conveyor output tiles within Chebyshev-2 of the enemy core.
+    conv_targets = map_info._conveyor_target_tiles(enemy_conv)
+    cheb2_core = map_info.expand_chebyshev(map_info._bm_their_core_area, 2)
+    a = conv_targets & cheb2_core
+    # (b) cardinally adjacent to a harvester AND a conveyor.
+    b = map_info.manhattan(enemy_harv) & map_info.manhattan(enemy_conv)
+    return (a | b) & _barrierable()
+
+
+def _best_walk_tile(choke: int):
+    """The choke tile in `choke` I can get adjacent to (to barrier it) no later than
+    the nearest enemy builder could, within _REACH_CAP moves; None if there is none."""
+    w, h = map_info._width, map_info._height
+    passable = map_info.passable()
+    my = map_info._my_pos
+    my_field = _dist_field(1 << (my.x + my.y * w), passable, _REACH_CAP)
+    enemy_bots = map_info._bm_enemy_bots
+    enemy_field = _dist_field(enemy_bots, passable, _REACH_CAP) if enemy_bots else {}
+    best_tile = None
+    best_reach = None
+    m = choke
+    while m:
+        b = m & -m
+        m ^= b
+        n = b.bit_length() - 1
+        my_reach = _reach_to_adjacent(my_field, n, w, h, passable)
+        if my_reach is None:
+            continue                        # I can't get adjacent within the cap
+        enemy_reach = _reach_to_adjacent(enemy_field, n, w, h, passable)
+        # Win the race: adjacent no later than the nearest enemy. If no enemy can reach
+        # it within the cap, I win by default.
+        if enemy_reach is not None and my_reach > enemy_reach:
+            continue
+        if best_reach is None or my_reach < best_reach:
+            best_reach = my_reach
+            best_tile = Position(n % w, n // w)
+    return best_tile
+
+
 def score(can_move=True):
     global _cached_target, _cached_walk
     _cached_target = None
     _cached_walk = None
-    # A rush-mode builder only acts within Chebyshev-4 of the enemy core.
-    if not units.builder.rush_can_act():
-        return 0
     # While the enemy is undeveloped we're rushing their core -- don't peel builders
     # off to barrier-block a bot with no economy worth choking.
     if map_info.enemy_undeveloped():
@@ -147,47 +194,42 @@ def score(can_move=True):
     # barrier itself, or a positive score just parks a builder that can never build.
     if resources < barrier_cost:
         return 0
-    choke = _block_tiles()
+
+    # A rush-mode builder only acts on TARGET tiles within Chebyshev-4 of the enemy core.
+    rush_mask = units.builder.rush_target_mask()
+
+    # PRIORITY chokes come first: if one is already adjacent (place now) or a walk I
+    # can win, take it at PRIORITY_SCORE. Only if none is actionable do we fall back to
+    # the regular chokes/tiers below.
+    priority = _priority_block_tiles() & rush_mask
+    if priority:
+        adj = _adjacent_choke_now(priority)
+        if adj is not None:
+            _cached_target = adj
+            return PRIORITY_SCORE
+        if can_move and resources >= barrier_cost:
+            wt = _best_walk_tile(priority)
+            if wt is not None:
+                _cached_walk = wt
+                return PRIORITY_SCORE
+
+    choke = _block_tiles() & rush_mask
     if not choke:
         return 0
 
-    # Tier A: a choke is already one step away -> place it now, no move, top priority.
+    # Tier A: a choke is already one step away -> place it now, no move.
     adj = _adjacent_choke_now(choke)
     if adj is not None:
         _cached_target = adj
         return MAX_SCORE
 
-    if not can_move or resources < barrier_cost + map_info.ti_reserve():
+    if not can_move or resources < barrier_cost:
         return 0
 
     # Tier B: walk to a choke I can be adjacent to no later than the nearest enemy.
-    w, h = map_info._width, map_info._height
-    passable = map_info.passable()
-    my = map_info._my_pos
-    my_field = _dist_field(1 << (my.x + my.y * w), passable, _REACH_CAP)
-    enemy_bots = map_info._bm_enemy_bots
-    enemy_field = _dist_field(enemy_bots, passable, _REACH_CAP) if enemy_bots else {}
-
-    best_tile = None
-    best_reach = None
-    m = choke
-    while m:
-        b = m & -m
-        m ^= b
-        n = b.bit_length() - 1
-        my_reach = _reach_to_adjacent(my_field, n, w, h, passable)
-        if my_reach is None:
-            continue                        # I can't get adjacent within the cap
-        enemy_reach = _reach_to_adjacent(enemy_field, n, w, h, passable)
-        # Win the race: I must be adjacent no later than the nearest enemy. If no
-        # enemy can reach it within the cap, I win by default.
-        if enemy_reach is not None and my_reach > enemy_reach:
-            continue
-        if best_reach is None or my_reach < best_reach:
-            best_reach = my_reach
-            best_tile = Position(n % w, n // w)
-    if best_tile is not None:
-        _cached_walk = best_tile
+    wt = _best_walk_tile(choke)
+    if wt is not None:
+        _cached_walk = wt
         return WALK_SCORE
     return 0
 
@@ -211,6 +253,6 @@ def run(can_move=True):
     if nav.move_adjacent(t, can_move=can_move):
         return                              # still moving into position
     if (rc.can_build_barrier(t)
-            and rc.get_global_resources() >= rc.get_barrier_cost() + map_info.ti_reserve()):
+            and rc.get_global_resources() >= rc.get_barrier_cost()):
         rc.build_barrier(t)
         map_info.update_at(t)

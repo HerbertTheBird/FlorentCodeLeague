@@ -14,6 +14,10 @@ rc: Controller
 
 # --- Configurable ---
 SCALE_MULT = 0.8
+# Merge starting ore into at most this many groups. The opening spends the builder
+# budget as: 1 rush builder (no plan, straight into rush mode) + one builder per ore
+# group + fan-out for any leftover. With INITIAL_SPAWN_COUNT=4 that's 1 rush + 3 groups.
+MAX_ORE_GROUPS = 3
 # Core distress alarm fires in the early game (round < CORE_ALARM_MAX_ROUND) when
 # exactly ONE enemy builder bot is known ANYWHERE (tracked, not just in view) AND at
 # least this many enemy sentinels can fire on the core -- a sentinel siege the core
@@ -545,7 +549,7 @@ def starting_convs():
     # have too many groups (very ore-dense map), keep the 4 largest and leave the
     # rest to the normal harvest/route states.
     MAX_GROUP_ORES = 4
-    while len(nearby_ore) > INITIAL_SPAWN_COUNT:
+    while len(nearby_ore) > MAX_ORE_GROUPS:
         closest = [100000, -1, -1]
         for i in range(len(nearby_ore)):
             for j in range(i + 1, len(nearby_ore)):
@@ -560,7 +564,7 @@ def starting_convs():
         nearby_ore[i].extend(nearby_ore[j])
         del nearby_ore[j]
     nearby_ore.sort(key=len, reverse=True)
-    del nearby_ore[INITIAL_SPAWN_COUNT:]              # never exceed the builder budget
+    del nearby_ore[MAX_ORE_GROUPS:]                   # keep the largest few groups only
     import time
 
     avoid_mask = 0
@@ -747,10 +751,10 @@ def run():
         start = time.perf_counter()
 
         _starting_convs = starting_convs()
-        # Opening budget is INITIAL_SPAWN_COUNT builders: one per ore group, then
-        # the leftovers fan out. The fan-out bearings are kept maximally spread
-        # from the ore-group directions (_starting_conv_dirs) for best coverage.
-        n_fanout = max(0, INITIAL_SPAWN_COUNT - len(_starting_convs))
+        # Opening budget is INITIAL_SPAWN_COUNT builders: ONE rush builder (round 0, no
+        # plan), one per ore group, then the leftovers fan out. The fan-out bearings are
+        # kept maximally spread from the ore-group directions for best coverage.
+        n_fanout = max(0, INITIAL_SPAWN_COUNT - 1 - len(_starting_convs))
         ore_dirs = [d for d in _starting_conv_dirs if d is not None]
         _fanout_dirs = choose_fanout_plan(rc, map_info._my_pos, n_fanout, ore_dirs)
 
@@ -766,8 +770,13 @@ def run():
     r = rc.get_current_round()
     num_groups = len(_starting_convs)
     spawned_conv = False
-    if r < num_groups:
-        spawned_conv = _spawn_starting_conv(r)
+    if r == 0:
+        # First builder: spawn it WITHOUT a plan so it reads no conveyor tree and goes
+        # straight into rush mode. (spawned_conv gates the defense/fan-out spawns below,
+        # so this consumes the turn's single spawn.)
+        spawned_conv = _spawn_toward_center()
+    elif 1 <= r <= num_groups:
+        spawned_conv = _spawn_starting_conv(r - 1)
 
     # Predicted income: sum over conveyors feeding the core of min(n,4), n = ti
     # stacks within hops 0-3 upstream. Broadcast the raw value (route_total reads
@@ -798,14 +807,15 @@ def run():
 
     if (not spawned_conv and not spawned_defense
             and titanium >= rc.get_scale_percent() * SCALE_MULT):
-        if r < num_groups:
-            _spawn_toward_center()
+        if r <= num_groups:
+            _spawn_toward_center()          # rush builder (r==0) or a group round fallback
         else:
-            # Ran out of ore groups: fan the remaining opening builders out along
-            # the precomputed spread bearings (falling back to center if the best
-            # spawn tile for that bearing is blocked).
-            idx = r - num_groups
-            if idx < len(_fanout_dirs):
+            # Past the rush builder and every ore group: fan the remaining opening
+            # builders out along the precomputed spread bearings (falling back to center
+            # if the best spawn tile for that bearing is blocked). The -1 accounts for
+            # the round-0 rush builder consuming a spawn slot.
+            idx = r - num_groups - 1
+            if 0 <= idx < len(_fanout_dirs):
                 if not _spawn_toward_dir(map_info._my_pos, _fanout_dirs[idx]):
                     _spawn_toward_center()
 

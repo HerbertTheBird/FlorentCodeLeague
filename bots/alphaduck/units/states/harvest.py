@@ -29,7 +29,7 @@ def _my_claims(repair=False):
         available &= map_info.expand_manhattan(valid_route_targets)
     if units.builder._stay_near_core:
         available &= units.builder.near_core_mask()
-    return pathing.claim_subset(my_mask, map_info._bm_friendly_bots, available, tie_self=False)
+    return pathing.claim_subset(my_mask, map_info.claim_bots(), available, tie_self=False)
 
 def init(c: Controller):
     global rc, nav

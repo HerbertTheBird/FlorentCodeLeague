@@ -157,7 +157,7 @@ _width = _height = 0
 # Holding it unconditionally (rather than only while a threat is live) measured
 # better on both opponents tested — an on-demand version cost ~10 points against
 # Khaos and gained nothing against Heimdall v3 — so this stays simple.
-TI_RESERVE_CAP = 30
+TI_RESERVE_CAP = 60
 # Tried and rejected: scaling the reserve to current titanium
 # (min(cap, resources/3)) so it could never freeze construction when poor. The
 # reasoning looked sound — ladder replays show antler games where we sit at
@@ -269,6 +269,7 @@ _bm_hp_changed: int = 0           # visible building tiles whose HP changed vs l
 
 # Builder bot tracking
 _bm_friendly_bots: int = 0       # bitmask of known friendly builder bot positions
+_bm_rusher_bots: int = 0         # subset of friendly bots that broadcast the rush flag
 _bm_enemy_bots: int = 0          # bitmask of known enemy builder bot positions
 _bm_friendly_stationary: int = 0 # friendly bots seen on the SAME tile last turn and this turn (parked -- routed around, not followed, in the is_route=False avoid)
 _bot_pos: dict[int, int] = {}    # uid -> tile index (both teams)
@@ -1378,13 +1379,22 @@ def comm_core_sym3() -> int:
     return val
 
 
-def set_comm_bots(friendly_claims, enemy_pos_ids) -> None:
+def claim_bots() -> int:
+    """`_bm_friendly_bots` with the dedicated rusher removed -- the competitor set for
+    the economy claim contests (route/harvest/disrupt) the rusher will never service.
+    The rusher is pair 0 (the first builder); its tile is masked out in set_comm_bots.
+    Without this, a real builder yields a tied tile to the (closer) rusher, which then
+    bails at its rush guard and never builds it, so the tile is stranded."""
+    return _bm_friendly_bots & ~_bm_rusher_bots
+
+
+def set_comm_bots(friendly_claims, enemy_pos_ids, rusher_id: int = 0) -> None:
     """Fold globally-shared builder positions from comms into the bot masks (which
     update() already built from local vision). Call after update() + comms.read(),
     before recompute_derived(). friendly_claims: list[(Position, owner id mod 128)];
     enemy_pos_ids: list[(Position, id mod 128)]."""
     global _bm_friendly_bots, _bm_enemy_bots, _comm_enemy_ids
-    global _bm_friendly_tie_lose, _bm_friendly_tie_win
+    global _bm_friendly_tie_lose, _bm_friendly_tie_win, _bm_rusher_bots
     w = _width
     my_n = _my_pos.x + _my_pos.y * w
     my_r = _rc.get_id() & 127
@@ -1432,6 +1442,10 @@ def set_comm_bots(friendly_claims, enemy_pos_ids) -> None:
     tie_win &= ~tie_lose                    # lose (I win the tile) wins any tile overlap
     _bm_friendly_tie_lose = tie_lose
     _bm_friendly_tie_win = tie_win
+    # Dedicated rusher (pair 0, the first builder) -> its freshest tile, so claim_bots()
+    # can drop it from the economy claim contests. rusher_id 0 means not-yet-known.
+    rusher = fmerge.get(rusher_id) if rusher_id else None
+    _bm_rusher_bots = (1 << rusher[0]) if rusher is not None else 0
 
     # Dedupe enemies by id before building the mask. Two builders that each relayed
     # the SAME enemy at different tiles (it moved between their sightings) would

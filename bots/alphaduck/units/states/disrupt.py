@@ -26,7 +26,7 @@ def _my_claims():
     candidates = _disruptable_ore()
     if units.builder._stay_near_core:
         candidates &= units.builder.near_core_mask()
-    return pathing.claim_subset(my_mask, map_info._bm_friendly_bots, candidates, tie_self=True)
+    return pathing.claim_subset(my_mask, map_info.claim_bots(), candidates, tie_self=True)
 
 # Denying the enemy an ore tile is the good side of the barrier trade — 3 Ti to
 # cost them a harvester site — so raising this above route (5) and harvest (4)
@@ -39,9 +39,6 @@ _cached_target = None
 def score(can_move=True):
     global _cached_target
     _cached_target = None
-    # A rush-mode builder only acts within Chebyshev-4 of the enemy core.
-    if not units.builder.rush_can_act():
-        return 0
     # While the enemy is undeveloped we're rushing their core -- don't peel builders
     # off to harass a bot with no economy worth disrupting.
     if map_info.enemy_undeveloped():
@@ -49,7 +46,8 @@ def score(can_move=True):
     # Can't afford a barrier (+ the defender reserve) -> don't select the state.
     if rc.get_global_resources() < rc.get_barrier_cost() + map_info.ti_reserve():
         return 0
-    claims = _my_claims()
+    # A rush-mode builder only acts on TARGET tiles within Chebyshev-4 of the enemy core.
+    claims = _my_claims() & units.builder.rush_target_mask()
     if not can_move:
         # In-place retry: only a target we can barrier from right here counts.
         claims &= map_info.manhattan(1 << (map_info._my_pos.x + map_info._my_pos.y * map_info._width))

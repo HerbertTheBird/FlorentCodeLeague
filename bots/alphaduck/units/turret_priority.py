@@ -94,13 +94,19 @@ def compute_priority_sets(rc) -> dict:
     enemy_launcher = bm_et[map_info._IDX_LAUNCHER] & enemy
     enemy_core = bm_et[map_info._IDX_CORE] & enemy
 
+    # Enemy conveyor/splitter cardinally adjacent to the enemy core -- a core feed worth
+    # cutting ahead of ordinary harvesters/belts.
+    core_feed = ((bm_et[map_info._IDX_CONVEYOR] | bm_et[map_info._IDX_SPLITTER])
+                 & enemy & map_info.manhattan(enemy_core))
+
     return {
         1: threatening,
         2: enemy_gs,
         3: enemy_bots,
-        4: enemy_harvesters | enemy_carrying_conv,
-        5: enemy_launcher,
-        6: enemy_core,
+        4: core_feed,
+        5: enemy_harvesters | enemy_carrying_conv,
+        6: enemy_launcher,
+        7: enemy_core,
     }
 
 
@@ -229,8 +235,9 @@ def select_best(candidates, priority_sets, nav, one_shot_hp: int,
     log(f"  bot_ring={'set' if bot_ring else '0'} ring_mode={bot_ring_mode} "
         f"ring_override={'set' if ring_override_mask else '0'}")
 
-    buckets = {1: [], 2: [], 3: [], 4: [], 5: [], 6: []}
-    fb_buckets = {1: [], 2: [], 3: [], 4: [], 5: [], 6: []}
+    prio_order = sorted(priority_sets)          # tier numbers, best (lowest) first
+    buckets = {p: [] for p in prio_order}
+    fb_buckets = {p: [] for p in prio_order}
     drop_friendly = 0
     for cand in candidates:
         bit = 1 << cand[1]
@@ -238,7 +245,7 @@ def select_best(candidates, priority_sets, nav, one_shot_hp: int,
             drop_friendly += 1
             continue
         p = None
-        for pp in (1, 2, 3, 4, 5, 6):
+        for pp in prio_order:
             if priority_sets[pp] & bit:
                 p = pp
                 break
@@ -255,15 +262,13 @@ def select_best(candidates, priority_sets, nav, one_shot_hp: int,
             else:
                 demote = True
         (fb_buckets if demote else buckets)[p].append(cand)
-    log(f"  buckets: p1={len(buckets[1])} p2={len(buckets[2])} p3={len(buckets[3])} "
-        f"p4={len(buckets[4])} p5={len(buckets[5])} p6={len(buckets[6])} "
-        f"(dropped {drop_friendly} friendly-bot) "
-        f"| fb: p1={len(fb_buckets[1])} p2={len(fb_buckets[2])} p3={len(fb_buckets[3])} "
-        f"p4={len(fb_buckets[4])} p5={len(fb_buckets[5])} p6={len(fb_buckets[6])}")
+    log("  buckets: " + " ".join(f"p{p}={len(buckets[p])}" for p in prio_order)
+        + f" (dropped {drop_friendly} friendly-bot) | fb: "
+        + " ".join(f"p{p}={len(fb_buckets[p])}" for p in prio_order))
 
     pools_in_order = (
-        [(f"p{p}", buckets[p]) for p in (1, 2, 3, 4, 5, 6)]
-        + [(f"fb_p{p}", fb_buckets[p]) for p in (1, 2, 3, 4, 5, 6)]
+        [(f"p{p}", buckets[p]) for p in prio_order]
+        + [(f"fb_p{p}", fb_buckets[p]) for p in prio_order]
     )
     for label, pool in pools_in_order:
         if not pool:
@@ -319,12 +324,15 @@ def _low_ti_hold(rc, target_pos) -> bool:
             return False
         hp = rc.get_hp(bid)
         is_core = rc.get_entity_type(bid) == EntityType.CORE
-    dmg = (GameConstants.SENTINEL_DAMAGE
-           if rc.get_entity_type(rc.get_id()) == EntityType.SENTINEL
-           else GameConstants.GUNNER_DAMAGE)
+    is_sentinel = rc.get_entity_type(rc.get_id()) == EntityType.SENTINEL
+    dmg = GameConstants.SENTINEL_DAMAGE if is_sentinel else GameConstants.GUNNER_DAMAGE
     if hp <= dmg:
         return False                              # one-shot -> take it
-    return is_core or _has_adjacent_enemy_builder(target_pos)
+    if is_core:
+        # SENTINELS may keep shooting the enemy core even under the ti reserve (their 18
+        # dmg actually dents it); only gunners conserve here.
+        return not is_sentinel
+    return _has_adjacent_enemy_builder(target_pos)
 
 
 def should_hold_fire(rc, target_pos) -> bool:

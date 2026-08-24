@@ -129,7 +129,7 @@ NON_GOOD_TILE_BUFF = 6
 # around the enemy core (Chebyshev-1), on top of whatever it hits -- pull siege
 # turrets right up against their core. Only applied while the core is actually a
 # target (i.e. the siege gate is open); see the bakes in the score computes.
-ADJ_ENEMY_CORE_SCORE = 16
+ADJ_ENEMY_CORE_SCORE = 32
 # Look-ahead: only give up placing a turret THIS turn to step one tile for a
 # better spot NEXT turn if the better spot's score beats what we could place now
 # by at least this much -- otherwise the one-turn delay isn't worth it.
@@ -1108,16 +1108,18 @@ SIEGE_MIN_HARVESTERS = 2
 def score(can_move=True):
     global SENTINEL_CORE_SCORE
 
-    # A rush-mode builder only places turrets within Chebyshev-4 of the enemy core.
-    if not units.builder.rush_can_act():
-        return 0
-
-    if map_info.enemy_undeveloped():
-        SENTINEL_CORE_SCORE = 32
-        SENTINEL_BUILDING_SCORE[map_info._IDX_CORE] = SENTINEL_CORE_SCORE
-    else:
-        SENTINEL_CORE_SCORE = 0
-        SENTINEL_BUILDING_SCORE[map_info._IDX_CORE] = SENTINEL_CORE_SCORE
+    # Target the enemy core with a sentinel when the enemy is undeveloped (rush it),
+    # OR when we don't already have a sentinel aimed at it -- so we plant the first
+    # siege sentinel but don't keep piling on once one covers the core. Sentinel
+    # coverage = my turret claims minus the gunner-ray portion.
+    sentinel_on_core = bool(map_info._bm_their_core_area
+                            & map_info._bm_my_turret_claims
+                            & ~map_info._bm_my_gunner_rays)
+    # if map_info.enemy_undeveloped() or not sentinel_on_core:
+    #     SENTINEL_CORE_SCORE = 32
+    # else:
+    #     SENTINEL_CORE_SCORE = 0
+    # SENTINEL_BUILDING_SCORE[map_info._IDX_CORE] = SENTINEL_CORE_SCORE
     global _SENT_CORE_BITS, _GUN_CORE_BITS_BY_STEP
     core = map_info._IDX_CORE
     # Siege the enemy core only once we have at least 2 COMPLETE routes -- real
@@ -1142,7 +1144,9 @@ def score(can_move=True):
     _GUN_CORE_BITS_BY_STEP = _step_bits_tuple(GUNNER_BUILDING_SCORE[core])
     global _cached_claims, _cached_best, cant_attack
     _expire_cant_attack()
-    _cached_claims = _my_claims()
+    # A rush-mode builder only places turrets on TARGET tiles within Chebyshev-4 of the
+    # enemy core (criterion on the placement tile, not where the builder stands).
+    _cached_claims = _my_claims() & units.builder.rush_target_mask()
     if not can_move:
         # In-place retry: only placement tiles we can build on from right here
         # (a cardinal neighbour) count -- everything else would need a move.

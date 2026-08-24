@@ -316,6 +316,13 @@ class Pathing:
         # no matter how much shorter that path is -- the soft tcost bucket only
         # detours around it. Our own tile stays passable (~start_mask below), so a
         # bot already in threat can still step out.
+        # Our OWN barriers are walkable at a COST (the `bcost` bucket below routes around
+        # them when a short detour exists, through them when there isn't). _compute_avoid's
+        # blanket "all buildings" rule marks them impassable, so drop them out of `avoid`
+        # -- but do it BEFORE folding in the lethal (`die`) and hard-turret avoidance, so a
+        # barrier tile that is ALSO lethal / hard-avoided gets re-blocked and is never
+        # walked onto. Only a barrier avoided SOLELY for being a barrier becomes passable.
+        avoid = avoid & ~(bm_et[idx_barrier] & bm_team[map_info._my_team_idx])
         if hard_avoid_turret:
             avoid = avoid | map_info._bm_enemy_turret_threat
         avoid = (avoid | die) & ~start_mask

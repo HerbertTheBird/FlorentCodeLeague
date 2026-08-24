@@ -219,7 +219,8 @@ def _find_target():
     my_bit = 1 << (my_pos.x + my_pos.y * w)
     enemy_bots = map_info._bm_enemy_bots
 
-    damaged_any = my & map_info._bm_damaged & map_info._bm_visible & _rush_heal_mask()
+    damaged_any = (my & map_info._bm_damaged & map_info._bm_visible
+                   & _rush_heal_mask() & units.builder.rush_target_mask())
     # While the core is still healthy (>= CORE_HEAL_HP) it isn't a real heal target
     # -- drop it from the candidates. score() offers a low-priority idle top-off
     # instead. Below the threshold it stays in and heals like anything else.
@@ -407,17 +408,21 @@ def _detour_target(primary: Position):
     return best if best is not None else primary
 
 
-# MAX_SCORE is the cap the state machine orders on. We sit ABOVE attack (9) so
-# that we get evaluated first, but normally only RETURN NORMAL_SCORE (just below
-# attack). The one exception: when we're wedged between 2+ of our own not-full-HP
-# buildings, healing both beats attacking, so we return the full MAX_SCORE and
-# outrank attack.
-MAX_SCORE = 9.5
+# MAX_SCORE is the cap the state machine orders on -- it must equal the HIGHEST score
+# score() can return, so the selection loop (sorted by MAX_SCORE desc, early-breaks
+# once best >= the next state's MAX_SCORE) evaluates heal before chase (11)/block (10).
+# The RACE tier below returns 12, so MAX_SCORE is 12. EMERGENCY_SCORE (9.5) is the old
+# cap: break-replace, a critical alarm heal, and the wedged-between-2-buildings case
+# all return it -- above attack (9) but still yielding to chase/block.
+MAX_SCORE = 12
+RACE_SCORE = 12          # knife's-edge race to save a threatened conveyor (top priority)
+EMERGENCY_SCORE = 9.5
 NORMAL_SCORE = 8.75
 # Core HP below which an alarm heal jumps from NORMAL_SCORE to MAX_SCORE.
 CRITICAL_CORE_HP = 300
 _cached_target = None
 _cached_break_replace = None    # (Position, kind, facing) to destroy+rebuild this turn
+_cached_race = None             # Position of a knife's-edge conveyor to race to (RACE_SCORE)
 
 
 def _adjacent_lower_enemy(x: int, y: int, my_id: int) -> bool:
@@ -490,8 +495,12 @@ def _find_break_replace():
     return None
 
 
-def _do_break_replace(job) -> None:
+def _do_break_replace(job, can_move=True) -> None:
     pos, kind, facing = job
+    # Move into place first: adjacent+safe -> bfs_move keeps us put and we act below; on
+    # a friendly gunner's lane -> it steps us off instead of acting there.
+    if nav.move_adjacent(pos, can_move=can_move):
+        return
     log("BREAK-REPLACE", pos)
     cost = rc.get_conveyor_cost() if kind == 'conveyor' else rc.get_barrier_cost()
     if not (rc.can_destroy(pos) and has_op() and rc.get_global_resources() >= cost):
@@ -542,14 +551,141 @@ def _idle_core_target():
     return tgt
 
 
+# ---------------------------------------------------------------------------
+# Knife's-edge conveyor rescue (RACE_SCORE, the top tier)
+# ---------------------------------------------------------------------------
+# For a damaged conveyor of mine that an enemy is contesting (under enemy turret
+# threat OR with an enemy builder cardinally adjacent), we simulate the foot race
+# between ME and the closest enemy builder to a tile ADJACENT to the conveyor --
+# whoever gets adjacent first wins it (I heal it, they destroy it). Distances:
+#   x = my moves to reach an adjacent tile,  y = the enemy's moves to reach one.
+# Turn order: the lower-id unit acts first each round; on its turn it steps one
+# closer (x-=1 / y-=1). "If it is ever my turn and x==0 at the start, I win; if it
+# is ever the enemy's turn and y==0 at the start, I lose." (Gunner/sentinel fire is
+# NOT part of this verdict -- only the x/y race decides it.) We flag a conveyor only
+# when it is a KNIFE'S EDGE: the real (x, y) is a win, but (x+1, y-1) -- one step
+# worse for me, one better for them -- flips it to a loss. Those are exactly the
+# ones where leaving now is the difference between saving and losing it.
+
+
+def _race_dists(n: int, passable: int, my_bit: int, enemy: int):
+    """One BFS out from the conveyor's cardinal-neighbour ring: return
+    (x, y, enemy_tile) where x is my move-distance to a tile adjacent to conveyor
+    `n`, y is the closest enemy builder's move-distance to one, and enemy_tile is
+    that enemy's tile (for its id). x/y are -1 if unreachable within MAX_HEAL_DIST."""
+    space = passable | my_bit | enemy
+    seed = map_info.manhattan(1 << n) & space
+    x = y = -1
+    etile = -1
+    if not seed:
+        return (-1, -1, -1)
+    if seed & my_bit:
+        x = 0
+    hit = seed & enemy
+    if hit:
+        y = 0
+        etile = (hit & -hit).bit_length() - 1
+    frontier = seed
+    visited = seed
+    dist = 0
+    while (x < 0 or y < 0) and dist < MAX_HEAL_DIST:
+        dist += 1
+        frontier = map_info.expand_manhattan(frontier) & space & ~visited
+        if not frontier:
+            break
+        if x < 0 and (frontier & my_bit):
+            x = dist
+        if y < 0 and (frontier & enemy):
+            hit = frontier & enemy
+            y = dist
+            etile = (hit & -hit).bit_length() - 1
+        visited |= frontier
+    return (x, y, etile)
+
+
+def _race_win(x: int, y: int, enemy_first: bool) -> bool:
+    """Simulate the foot race. True = I reach adjacency first (win), False = the
+    enemy does (lose). Checks happen at the START of each unit's turn, before it
+    steps. Rounds cycle in id order until one side hits 0."""
+    while True:
+        if enemy_first:
+            if y <= 0:
+                return False
+            y -= 1
+            if x <= 0:
+                return True
+            x -= 1
+        else:
+            if x <= 0:
+                return True
+            x -= 1
+            if y <= 0:
+                return False
+            y -= 1
+
+
+def _race_rescue_target():
+    """The closest (smallest x) damaged, contested conveyor of mine that is on the
+    knife's edge -- a win now, a loss at (x+1, y-1). Position, or None."""
+    my_team = map_info._bm_team[map_info._my_team_idx]
+    conv = map_info._bm_et[map_info._IDX_CONVEYOR] & my_team
+    enemy = map_info._bm_enemy_bots
+    if not conv or not enemy:
+        return None
+    # Contested = under enemy turret threat OR with an enemy builder cardinally
+    # adjacent; and only ones a heal would be spent on (missing > HEAL_MIN_DAMAGE).
+    contested = conv & map_info._bm_damaged & (
+        map_info._bm_enemy_turret_threat | map_info.manhattan(enemy))
+    contested = _heal_worthy(contested)
+    if not contested:
+        return None
+    passable = map_info.passable()
+    my_pos = map_info._my_pos
+    my_bit = 1 << (my_pos.x + my_pos.y * map_info._width)
+    my_r = rc.get_id() & 127
+    ids = map_info._comm_enemy_ids
+    best = None
+    best_x = None
+    m = contested
+    while m:
+        b = m & -m
+        m ^= b
+        n = b.bit_length() - 1
+        x, y, etile = _race_dists(n, passable, my_bit, enemy)
+        if x < 0 or y < 0:
+            continue                              # I or the enemy can't reach it
+        enemy_r = ids.get(etile)
+        if enemy_r is None:
+            continue
+        enemy_first = enemy_r < my_r
+        # Knife's edge: a win at the real distances, a loss one step worse.
+        if not _race_win(x, y, enemy_first):
+            continue
+        if not _race_win(x + 1, max(y - 1, 0), enemy_first):
+            if best_x is None or x < best_x:
+                best_x = x
+                best = Position(n % map_info._width, n // map_info._width)
+    return best
+
+
 def score(can_move=True):
-    global _cached_target, _cached_break_replace
+    global _cached_target, _cached_break_replace, _cached_race
+    _cached_race = None
     # Break-and-replace is an in-place action (destroy + rebuild a doomed adjacent
     # conveyor/barrier) -- evaluate it first, and even during the free-action retry.
     _cached_break_replace = _find_break_replace()
+    # Knife's-edge conveyor rescue is the top tier (a walk, so can_move only). It
+    # outranks even break-replace, so check it before break-replace's early return.
+    if can_move:
+        race = _race_rescue_target()
+        if race is not None:
+            _cached_race = race
+            _cached_target = None
+            _cached_break_replace = None
+            return RACE_SCORE
     if _cached_break_replace is not None:
         _cached_target = None
-        return MAX_SCORE
+        return EMERGENCY_SCORE
     if not can_move:
         # Heal's in-place action (topping off an adjacent building) already runs
         # every turn via _do_best_heal(), so there's nothing extra for the retry.
@@ -563,14 +699,12 @@ def score(can_move=True):
             tgt, _ = nav.closest(core_area)
             if tgt is not None:
                 _cached_target = tgt
-                # Critically low core under alarm -> MAX_SCORE (outranks attack);
+                # Critically low core under alarm -> EMERGENCY_SCORE (outranks attack);
                 # otherwise the alarm heal sits just below attack at NORMAL_SCORE.
-                return MAX_SCORE if _core_hp() < CRITICAL_CORE_HP else NORMAL_SCORE
-    # Rush mode: only heal (turrets/barriers) while within Chebyshev-4 of the enemy
-    # core. The alarm branch above is exempt -- a builder can always go back to heal.
-    if not units.builder.rush_can_act():
-        _cached_target = None
-        return 0
+                return EMERGENCY_SCORE if _core_hp() < CRITICAL_CORE_HP else NORMAL_SCORE
+    # Rush mode: only heal a TARGET building that is itself within Chebyshev-4 of the
+    # enemy core (filtered in _find_target via rush_target_mask). The alarm branch above
+    # is exempt -- a builder can always go back to heal the core.
     target = _find_target()
     if target is not None:
         target = _detour_target(target)       # only detours when adjacent to primary
@@ -579,7 +713,7 @@ def score(can_move=True):
     # attack. (_do_best_heal tops them off each turn; the target above just keeps
     # us in position / lets run() finish the move if we aren't adjacent yet.)
     if _adjacent_multi_damaged():
-        return MAX_SCORE
+        return EMERGENCY_SCORE
     if _cached_target is not None:
         return NORMAL_SCORE
     # Nothing urgent to heal. If our core is dented but still healthy, top it off
@@ -616,8 +750,15 @@ def _hold_or_flee():
 
 
 def run(can_move=True):
+    if _cached_race is not None:
+        # Race to the knife's-edge conveyor: walk toward it and heal on arrival.
+        # move_adjacent keeps us put once we're beside it (then _do_best_heal tops
+        # it off) and steps us off a lethal tile if ours becomes one.
+        log("HEAL-RACE", _cached_race)
+        nav.move_adjacent(_cached_race)
+        return
     if _cached_break_replace is not None:
-        _do_break_replace(_cached_break_replace)   # in-place: destroy + rebuild the doomed tile
+        _do_break_replace(_cached_break_replace, can_move)   # destroy + rebuild the doomed tile
         return
     if not can_move:
         return              # heal never wins the in-place retry (see score())

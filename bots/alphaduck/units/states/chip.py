@@ -66,8 +66,9 @@ _BESTMOVE = chip_precompute._dec(zlib.decompress(chip_bestmove_data.ZDATA), 0)[0
 def _terrain():
     """Every board mask chip needs, computed once and shared by validity AND the
     run-time attack choice. In particular `chippable` is defined in exactly ONE place
-    here -- an enemy titanium-carrying conveyor that is not stuck, or an enemy
-    harvester. valid_targets() (which decides a stand tile is a win) and every
+    here -- an enemy titanium-carrying conveyor that is not stuck, an enemy harvester,
+    or an enemy conveyor cardinally touching their core (a core feed, worth killing
+    even when idle). valid_targets() (which decides a stand tile is a win) and every
     run-time target scan (which decides what to fire at) read this same mask, so they
     can never disagree about what counts as a target. (They used to: a tile was
     certified a win via a belt that the run-time solve had filtered out, so the
@@ -79,11 +80,18 @@ def _terrain():
     board = map_info._board_mask
     any_b = map_info._bm_any_building
     blockers = (any_b & ~conv & ~splitter) | walls      # physically impassible
-    chippable = map_info._bm_team[1 - map_info._my_team_idx] & (
-        (map_info._bm_ti_carrying & ~map_info.conv_stuck) | harv)
+    # A conveyor cardinally touching the ENEMY CORE feeds it, so it's worth chipping
+    # even when it isn't currently carrying (killing it starves the core) -- consider
+    # it a target too. (The win-table still decides whether we can actually kill it.)
+    core_adj_conv = conv & map_info.expand_manhattan(map_info._bm_their_core_area)
+    enemy = map_info._bm_team[1 - map_info._my_team_idx]
+    barr = map_info._bm_et[map_info._IDX_BARRIER] & enemy   # enemy barriers: also chippable
+    chippable = enemy & (
+        (map_info._bm_ti_carrying & ~map_info.conv_stuck) | harv | core_adj_conv | barr)
     return {
         "w": map_info._width, "h": map_info._height,
         "harv": harv,
+        "barr": barr,
         "blockers": blockers,
         "passable": board & ~blockers,
         "empty": board & ~any_b & ~walls,               # truly empty (barrierable)
@@ -106,8 +114,9 @@ def _classify(pos, ctx, want_heal=False):
                      tiles we may turn into walls
     """
     w, h = ctx["w"], ctx["h"]
-    chippable, harv, blockers, empty, passable = (
-        ctx["chippable"], ctx["harv"], ctx["blockers"], ctx["empty"], ctx["passable"])
+    chippable, harv, blockers, empty, passable, barr = (
+        ctx["chippable"], ctx["harv"], ctx["blockers"], ctx["empty"], ctx["passable"],
+        ctx["barr"])
     my_n = pos.x + pos.y * w
     codes = [0, 0, 0, 0]
     targets, barrierable = [], []
@@ -119,7 +128,10 @@ def _classify(pos, ctx, want_heal=False):
         n = x + y * w
         b = 1 << n
         if chippable & b:
-            is_h = bool(harv & b)
+            # Harvesters and enemy BARRIERS are identical to the solver: 30-HP healable
+            # blockers (HARVESTER_MAX_HP == BARRIER_MAX_HP == 30), so both map to the
+            # 'harv' type (code 3, maxhalf 15). Conveyors/splitters are 20-HP (code 2).
+            is_h = bool((harv | barr) & b)
             mh = 15 if is_h else 10
             codes[i] = 3 if is_h else 2
             hm = 0
@@ -467,20 +479,14 @@ def valid_targets() -> int:
 def score(can_move=True):
     global _cached_valid, _cached_T
     _cached_T = None
-    # Chip only operates with a real titanium cushion (> 20 ti).
-    if rc.get_global_resources() <= 20:
-        _cached_valid = 0
-        return 0
-    # A rush-mode builder only acts within Chebyshev-4 of the enemy core.
-    if not units.builder.rush_can_act():
-        _cached_valid = 0
-        return 0
     # While the enemy is undeveloped we're rushing their core -- don't peel builders
     # off to harass a bot with no economy worth chipping.
     if map_info.enemy_undeveloped():
         _cached_valid = 0
         return 0
-    _cached_valid = valid_targets()
+    # A rush-mode builder only acts on TARGET (stand) tiles within Chebyshev-4 of the
+    # enemy core.
+    _cached_valid = valid_targets() & units.builder.rush_target_mask()
     if not _cached_valid:
         return 0
     my = map_info._my_pos
@@ -539,14 +545,13 @@ def run(can_move=True):
             map_info.update_at(bt)
         return
 
-    # Walk ONTO the stand tile.
+    # Get ONTO the stand tile. move_to keeps us put when we're already there and safe,
+    # but steps us off a friendly gunner's lane rather than attacking from it.
+    if nav.move_to(T, can_move=can_move):
+        return
+    my = map_info._my_pos
     if my != T:
-        if not can_move:
-            return
-        nav.move_to(T)
-        my = map_info._my_pos
-        if my != T:
-            return
+        return
 
     # Standing on the tile, choose which target to attack (one shared classification):
     #  1. free-kill: a target that dies before any possible healer can reach it (O(1));

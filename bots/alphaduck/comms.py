@@ -106,6 +106,19 @@ _SYM_ROT, _SYM_VER, _SYM_HOR = 0, 1, 2
 _ID_MOD = 128                               # ids stored mod 2^7
 _ORIG_ID_MOD = 32                           # original 4 ids sent in 5 bits
 
+# The core is stationary, so the enemy builders it sees are broadcast relative to
+# the shared, all-units-agree anchor `map_info._my_core` (the 2x2 core's top-left).
+# The core's sensing area is the 2x2 body plus its vision disk (radius sqrt(20) ~= 4.5),
+# so every visible tile lies in an 11x11 window around the anchor -> 121 <= 128 tiles,
+# one 7-bit index. Each broadcast enemy costs 7 (relpos) + 7 (id) = 14 bits, same as a
+# builder-word enemy entry. id 0 terminates the list (ids are stored 1..127).
+_CORE_ENEMY_OFFSETS = [(dx, dy) for dy in range(-5, 6) for dx in range(-5, 6)]
+_CORE_ENEMY_OFF_IDX = {o: i for i, o in enumerate(_CORE_ENEMY_OFFSETS)}
+_CORE_ENEMY_RELBITS = 7
+_CORE_ENEMY_ENTRY_BITS = _CORE_ENEMY_RELBITS + 7
+_CORE_ENEMY_SHIFT = 12                       # first free bit in a not-just_spawned word
+_CORE_ENEMY_MAX = 3                          # (63 - 12 + 1) // 14 -> 3 entries fit
+
 # --- bit layout, filled in by init once the map size is known ---
 _POS_BITS = 0
 _POS_MASK = 0
@@ -144,6 +157,7 @@ _core_alarm = 0            # reader: last core-alarm bit read from the core word
 _slot_last_raw = None      # list[int|None] per PAIR: last raw 64-bit value seen
 _comm_friendly = None      # decoded: {pair -> Position}
 _comm_enemies = None       # decoded: list[(Position, id_mod128)]
+_core_enemies = ()         # decoded from the core word: list[(Position, id_mod128)]
 _dead_pairs = ()           # core: pairs found dead in this read() (zeroed at write)
 _read_round = -2
 
@@ -154,7 +168,7 @@ def init(c: Controller):
     global _my_pair, _my_slot_lo, _can_comm, _my_hb, _my_prev_pos, _spawn_round
     global _enemies_pre, _pending_core_plan, _orig_ids, _pair_owner, _pair_id, _just_spawned
     global _income_raw, _income, _slot_last_raw, _comm_friendly, _comm_enemies, _read_round
-    global _core_alarm_raw, _core_alarm
+    global _core_alarm_raw, _core_alarm, _core_enemies
     rc = c
     _width = map_info._width
     _height = map_info._height
@@ -184,6 +198,7 @@ def init(c: Controller):
     _slot_last_raw = [None] * _MAX_BUILDERS
     _comm_friendly = {}
     _comm_enemies = []
+    _core_enemies = []
     _read_round = -2
 
     # A builder self-assigns its slot from its spawn round. VERIFIED against the
@@ -247,6 +262,33 @@ def _local_enemies():
         if rc.get_team(uid) == rc.get_team():
             continue
         out.append((rc.get_position(uid), uid % _ID_MOD))
+    return out
+
+
+def _core_enemy_entries():
+    """Core only: up to _CORE_ENEMY_MAX (relidx, id_mod128) pairs for enemy builder
+    bots the core sees, encoded relative to the shared anchor `map_info._my_core`.
+    Enemies outside the 11x11 anchor window or with id-mod-128 == 0 are skipped (the
+    window covers the whole core sensing area; id 0 is the list terminator)."""
+    anchor = map_info._my_core
+    if anchor is None:
+        return []
+    out = []
+    for uid in rc.get_nearby_units():
+        if rc.get_entity_type(uid) != EntityType.BUILDER_BOT:
+            continue
+        if rc.get_team(uid) == rc.get_team():
+            continue
+        eid = uid % _ID_MOD
+        if eid == 0:
+            continue
+        ep = rc.get_position(uid)
+        relidx = _CORE_ENEMY_OFF_IDX.get((ep.x - anchor.x, ep.y - anchor.y))
+        if relidx is None:
+            continue
+        out.append((relidx, eid))
+        if len(out) >= _CORE_ENEMY_MAX:
+            break
     return out
 
 
@@ -352,7 +394,8 @@ def _encode_sym(solved: int, sym_type: int) -> int:
 
 
 def encode_core(rnd: int, plan_payload, sym3: int, orig_ids, income: int,
-                just_spawned: int, pair_owner, alarm: int = 0) -> int:
+                just_spawned: int, pair_owner, alarm: int = 0,
+                core_enemies=()) -> int:
     if 0 <= rnd < _NUM_ORIGINAL:
         return (plan_payload or 0) & 0xFFFFFFFFFFFFFFFF
     if rnd == _NUM_ORIGINAL:                    # round 4: sym + 4 x 5-bit ids
@@ -373,6 +416,17 @@ def encode_core(rnd: int, plan_payload, sym3: int, orig_ids, income: int,
         for k in range(_MAX_BUILDERS):
             val |= (pair_owner[k] & 0x7F) << shift
             shift += 7
+        return val
+    # Not just_spawned: bits 12..63 are free -> broadcast the enemy builders the core
+    # sees (relidx in 7 bits, id in 7 bits). id 0 (never emitted) terminates the list.
+    shift = _CORE_ENEMY_SHIFT
+    for relidx, eid in core_enemies[:_CORE_ENEMY_MAX]:
+        eid &= 0x7F
+        if eid == 0:
+            continue
+        val |= (relidx & ((1 << _CORE_ENEMY_RELBITS) - 1)) << shift
+        val |= eid << (shift + _CORE_ENEMY_RELBITS)
+        shift += _CORE_ENEMY_ENTRY_BITS
     return val
 
 
@@ -400,6 +454,18 @@ def decode_core(rnd: int, val: int):
             owners.append((val >> shift) & 0x7F)
             shift += 7
         out["pair_owner"] = owners
+        return out
+    # Not just_spawned: bits 12.. carry the core's enemy-builder sightings.
+    core_enemies = []
+    shift = _CORE_ENEMY_SHIFT
+    for _ in range(_CORE_ENEMY_MAX):
+        eid = (val >> (shift + _CORE_ENEMY_RELBITS)) & 0x7F
+        if eid == 0:
+            break                              # terminator
+        relidx = (val >> shift) & ((1 << _CORE_ENEMY_RELBITS) - 1)
+        core_enemies.append((relidx, eid))
+        shift += _CORE_ENEMY_ENTRY_BITS
+    out["core_enemies"] = core_enemies
     return out
 
 
@@ -564,17 +630,26 @@ def _absorb():
         map_info.note_comm_sym_possible(sym_possible)
         for ep, eid in ens:
             enemies.append((ep, eid))
+    # Fold in the enemy builders relayed by the core word (decoded in _absorb_core).
+    for ep, eid in _core_enemies:
+        enemies.append((ep, eid))
     _comm_friendly = friendly
     _comm_enemies = enemies
     _dead_pairs = dead
     # push global bot knowledge into map_info. Friendlies carry their owner id (mod
     # 128) so map_info can prefer a local sighting over the relayed (last-turn) claim.
     friendly_claims = [(pos, _pair_id[pair]) for pair, pos in friendly.items()]
-    map_info.set_comm_bots(friendly_claims, enemies)
+    # The dedicated rusher is always pair 0 (the first builder, spawn round 1). Every
+    # unit knows pair 0's owner id from the round-4 orig-id word, so map_info can mask
+    # that bot's tile out of the economy claim contests it will never service. (0 until
+    # that word is learned -> map_info masks nothing.)
+    map_info.set_comm_bots(friendly_claims, enemies, rusher_id=_pair_id[0])
 
 
 def _absorb_core(rnd: int):
     global _income, _my_pair, _my_slot_lo, _can_comm, _pair_id, _core_alarm
+    global _core_enemies
+    _core_enemies = []
     val = _read_pair(_CORE_LO)
     # We read at start of `rnd`, so the core word is its write from `rnd-1`.
     wrote_round = rnd - 1
@@ -587,6 +662,19 @@ def _absorb_core(rnd: int):
         _income = info["income"]
     if "alarm" in info:
         _core_alarm = info["alarm"]
+    # Enemy builders the core saw, decoded relative to the shared core anchor. All
+    # units agree on `map_info._my_core`, so we can rebuild absolute positions here.
+    if "core_enemies" in info and map_info._my_core is not None:
+        anchor = map_info._my_core
+        decoded = []
+        for relidx, eid in info["core_enemies"]:
+            if relidx >= len(_CORE_ENEMY_OFFSETS):
+                continue
+            dx, dy = _CORE_ENEMY_OFFSETS[relidx]
+            ex, ey = anchor.x + dx, anchor.y + dy
+            if 0 <= ex < _width and 0 <= ey < _height:
+                decoded.append((Position(ex, ey), eid))
+        _core_enemies = decoded
     # Learn pair -> owner id from the core's broadcasts (round-4 word carries the 4
     # original ids; a just_spawned word carries every late pair's owner). Kept for
     # every unit so relayed friendlies can be matched to local sightings by id.
@@ -634,8 +722,10 @@ def _write_core():
     rnd = rc.get_current_round()
     sym3 = map_info.comm_core_sym3()
     plan = _pending_core_plan
+    core_enemies = () if _just_spawned else _core_enemy_entries()
     val = encode_core(rnd, plan, sym3, _orig_ids, _income_raw,
-                      1 if _just_spawned else 0, _pair_owner, _core_alarm_raw)
+                      1 if _just_spawned else 0, _pair_owner, _core_alarm_raw,
+                      core_enemies)
     _write_pair(_CORE_LO, val)
     # Consume the plan: it's for the ONE builder spawned this round. Leaving it set
     # made later fanout rounds (still < _NUM_ORIGINAL) rebroadcast this stale plan,

@@ -166,11 +166,13 @@ def _find_trap_rotation():
 #   5. fire at a builder bot, OR a harvester/launcher/barrier/conveyor/splitter with
 #      no enemy bot cardinally adjacent, OR the core
 #   6. turn to pin a trapped builder bot
-#   7. turn to a LOADED conveyor/splitter
-#   8. turn to a harvester
-#   9. turn to a launcher
-#  10. turn to a barrier
-#  11. turn to the core
+#   7. turn to a conveyor/splitter cardinally adjacent to the enemy core
+#   8. turn to a LOADED conveyor/splitter
+#   9. turn to a harvester
+#  10. turn to a launcher
+#  11. turn to a barrier
+#  12. turn to any conveyor/splitter (only while the enemy core is visible)
+#  13. turn to the core
 def run():
     map_info.update()
     if rc.get_action_cooldown() > 0:
@@ -223,6 +225,11 @@ def run():
     def is_loaded_conv(h) -> bool:
         return h[0] == 'conveyor' and (loaded >> (h[1].x + h[1].y * w)) & 1
 
+    # 'conveyor' kind already covers splitters (see _ray_first_hit).
+    core_adj = map_info.manhattan(map_info._bm_their_core_area)   # cardinal neighbours of enemy core
+    def is_core_adj_conv(h) -> bool:
+        return h[0] == 'conveyor' and (core_adj >> (h[1].x + h[1].y * w)) & 1
+
     cur_kind = cur_hit[0] if cur_hit else None
     cur_threat = cur_hit[3] if cur_hit else False
 
@@ -244,19 +251,28 @@ def run():
     # 6: turn to pin a trapped builder bot.
     if turn(_find_trap_rotation()):
         return
-    # 7: turn to a loaded conveyor/splitter.
+    # 7: turn to a conveyor/splitter cardinally adjacent to the enemy core (a core feed).
+    if turn(turn_to(is_core_adj_conv)):
+        return
+    # 8: turn to a loaded conveyor/splitter.
     if turn(turn_to(is_loaded_conv)):
         return
-    # 8: turn to a harvester.
+    # 9: turn to a harvester.
     if turn(turn_to(lambda h: h[0] == 'harvester')):
         return
-    # 9: turn to a launcher.
+    # 10: turn to a launcher.
     if turn(turn_to(lambda h: h[0] == 'launcher')):
         return
-    # 10: turn to a barrier.
+    # 11: turn to a barrier.
     if turn(turn_to(lambda h: h[0] == 'barrier')):
         return
-    # 11: turn to the core.
+    # 12: turn to any conveyor/splitter -- but ONLY while we can SEE the enemy core (a
+    # siege gunner cutting belts that feed the core it's aimed at). Loaded and core-
+    # adjacent conveyors are already handled at tiers 7-8.
+    sees_enemy_core = bool(map_info._bm_their_core_area & map_info._bm_visible)
+    if sees_enemy_core and turn(turn_to(lambda h: h[0] == 'conveyor')):
+        return
+    # 13: turn to the core.
     if turn(turn_to(lambda h: h[0] == 'core')):
         return
 
